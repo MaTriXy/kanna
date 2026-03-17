@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom"
 import { APP_NAME } from "../../shared/branding"
 import { PROVIDERS, type AgentProvider, type AskUserQuestionAnswerMap, type ModelOptions, type ProviderCatalogEntry } from "../../shared/types"
 import { useChatPreferencesStore } from "../stores/chatPreferencesStore"
+import { useTerminalLayoutStore } from "../stores/terminalLayoutStore"
 import type { ChatSnapshot, LocalProjectsSnapshot, SidebarChatRow, SidebarData } from "../../shared/types"
 import type { AskUserQuestionItem } from "../components/messages/types"
 import { useAppDialog } from "../components/ui/app-dialog"
@@ -367,6 +368,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
 
     try {
       await socket.command({ type: "project.remove", projectId })
+      useTerminalLayoutStore.getState().clearProject(projectId)
       if (runtime?.projectId === projectId) {
         navigate("/")
       }
