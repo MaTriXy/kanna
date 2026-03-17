@@ -27,6 +27,10 @@
 ## Quickstart
 
 ```bash
+if ! command -v bun >/dev/null 2>&1; then
+  curl -fsSL https://bun.sh/install | bash
+fi
+
 bun install -g kanna-code
 ```
 
@@ -74,9 +78,13 @@ Local File System (~/.kanna/data/, project dirs)
 
 ## Install
 
-Install globally via bun:
+Install Bun if needed, then install Kanna globally:
 
 ```bash
+if ! command -v bun >/dev/null 2>&1; then
+  curl -fsSL https://bun.sh/install | bash
+fi
+
 bun install -g kanna-code
 ```
 
