@@ -1,11 +1,10 @@
-import { PanelRight } from "lucide-react"
+import { RIGHT_SIDEBAR_MIN_WIDTH_PX } from "../../stores/rightSidebarStore"
 
 export function RightSidebar() {
   return (
-    <div className="h-full min-h-0 border-l border-border bg-background">
+    <div className="h-full min-h-0 border-l border-border bg-background" style={{ minWidth: RIGHT_SIDEBAR_MIN_WIDTH_PX }}>
       <div className="flex h-full min-h-0 flex-col">
         <div className="flex h-[72px] shrink-0 items-center gap-3 border-b border-border px-5">
-          <PanelRight className="h-4.5 w-4.5 text-muted-foreground" />
           <div className="min-w-0">
             <h2 className="text-sm font-medium text-foreground">RightSidebar</h2>
             <p className="text-xs text-muted-foreground">Future feature placeholder</p>

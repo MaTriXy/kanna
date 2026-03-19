@@ -10,7 +10,12 @@ import { Card, CardContent } from "../components/ui/card"
 import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../components/ui/resizable"
 import { ScrollArea } from "../components/ui/scroll-area"
 import { cn } from "../lib/utils"
-import { DEFAULT_PROJECT_RIGHT_SIDEBAR_LAYOUT, useRightSidebarStore } from "../stores/rightSidebarStore"
+import {
+  DEFAULT_PROJECT_RIGHT_SIDEBAR_LAYOUT,
+  RIGHT_SIDEBAR_MAX_SIZE_PERCENT,
+  RIGHT_SIDEBAR_MIN_SIZE_PERCENT,
+  useRightSidebarStore,
+} from "../stores/rightSidebarStore"
 import { DEFAULT_PROJECT_TERMINAL_LAYOUT, useTerminalLayoutStore } from "../stores/terminalLayoutStore"
 import { useTerminalPreferencesStore } from "../stores/terminalPreferencesStore"
 import { TERMINAL_TOGGLE_ANIMATION_DURATION_MS } from "./terminalToggleAnimation"
@@ -153,6 +158,14 @@ export function ChatPage() {
     return () => observer.disconnect()
   }, [projectId, shouldRenderTerminalLayout, terminalLayout.mainSizes])
 
+  const clampRightSidebarSize = (size: number) => {
+    if (!Number.isFinite(size)) {
+      return rightSidebarLayout.size
+    }
+
+    return Math.min(RIGHT_SIDEBAR_MAX_SIZE_PERCENT, Math.max(RIGHT_SIDEBAR_MIN_SIZE_PERCENT, size))
+  }
+
   const chatCard = (
     <Card ref={chatCardRef} className="bg-background h-full flex flex-col overflow-hidden border-0 rounded-none relative">
       <CardContent className="flex flex-1 min-h-0 flex-col p-0 overflow-hidden relative">
@@ -293,11 +306,27 @@ export function ChatPage() {
           groupRef={rightSidebarPanelGroupRef}
           orientation="horizontal"
           className="flex-1 min-h-0"
+          onLayoutChange={(layout) => {
+            if (!showRightSidebar || isRightSidebarAnimating.current) {
+              return
+            }
+
+            const clampedRightSidebarSize = clampRightSidebarSize(layout.rightSidebar)
+            if (Math.abs(clampedRightSidebarSize - layout.rightSidebar) < 0.1) {
+              return
+            }
+
+            rightSidebarPanelGroupRef.current?.setLayout({
+              workspace: 100 - clampedRightSidebarSize,
+              rightSidebar: clampedRightSidebarSize,
+            })
+          }}
           onLayoutChanged={(layout) => {
             if (!showRightSidebar || isRightSidebarAnimating.current) {
               return
             }
-            setRightSidebarSize(projectId, layout.rightSidebar)
+
+            setRightSidebarSize(projectId, clampRightSidebarSize(layout.rightSidebar))
           }}
         >
           <ResizablePanel
@@ -376,8 +405,7 @@ export function ChatPage() {
           <ResizablePanel
             id="rightSidebar"
             defaultSize={`${rightSidebarLayout.size}%`}
-            minSize="0%"
-            maxSize="50%"
+            maxSize={`${RIGHT_SIDEBAR_MAX_SIZE_PERCENT}%`}
             className="min-h-0 min-w-0"
             elementRef={sidebarPanelRef}
           >
