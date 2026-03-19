@@ -1,4 +1,14 @@
-import { Children, cloneElement, isValidElement, useState, useCallback, type ReactNode, type ComponentPropsWithoutRef } from "react"
+import {
+  Children,
+  cloneElement,
+  createContext,
+  isValidElement,
+  useCallback,
+  useContext,
+  useState,
+  type ComponentPropsWithoutRef,
+  type ReactNode,
+} from "react"
 import { Button } from "../ui/button"
 import {
   ArrowDownToLine,
@@ -22,6 +32,27 @@ import {
 } from "lucide-react"
 import { cn } from "../../lib/utils"
 import { parseLocalFileLink } from "../../lib/pathUtils"
+
+type OpenLocalLinkTarget = { path: string; line?: number; column?: number }
+type OpenLocalLinkHandler = (target: OpenLocalLinkTarget) => void
+
+const defaultOpenLocalLink: OpenLocalLinkHandler = () => {}
+
+const OpenLocalLinkContext = createContext<OpenLocalLinkHandler>(defaultOpenLocalLink)
+
+export function OpenLocalLinkProvider({
+  children,
+  onOpenLocalLink,
+}: {
+  children: ReactNode
+  onOpenLocalLink?: OpenLocalLinkHandler
+}) {
+  return (
+    <OpenLocalLinkContext.Provider value={onOpenLocalLink ?? defaultOpenLocalLink}>
+      {children}
+    </OpenLocalLinkContext.Provider>
+  )
+}
 
 // Tool icon mapping - shared between ToolCallMessage and SystemMessage
 export const toolIcons: Record<string, LucideIcon> = {
@@ -327,11 +358,12 @@ export const markdownComponents = {
 }
 
 export function createMarkdownComponents(options?: {
-  onOpenLocalLink?: (target: { path: string; line?: number; column?: number }) => void
+  onOpenLocalLink?: OpenLocalLinkHandler
 }) {
   return {
     ...markdownComponents,
     a: ({ children, href, onClick, ...props }: ComponentPropsWithoutRef<"a">) => {
+      const onOpenLocalLink = options?.onOpenLocalLink ?? useContext(OpenLocalLinkContext)
       const parsedLocalLink = parseLocalFileLink(href)
 
       return (
@@ -342,9 +374,9 @@ export function createMarkdownComponents(options?: {
           rel={parsedLocalLink ? undefined : "noopener noreferrer"}
           onClick={(event) => {
             onClick?.(event)
-            if (event.defaultPrevented || !parsedLocalLink || !options?.onOpenLocalLink) return
+            if (event.defaultPrevented || !parsedLocalLink || onOpenLocalLink === defaultOpenLocalLink) return
             event.preventDefault()
-            options.onOpenLocalLink(parsedLocalLink)
+            onOpenLocalLink(parsedLocalLink)
           }}
           {...props}
         >

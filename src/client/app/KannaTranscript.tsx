@@ -16,6 +16,7 @@ import { CompactBoundaryMessage, ContextClearedMessage } from "../components/mes
 import { CompactSummaryMessage } from "../components/messages/CompactSummaryMessage"
 import { StatusMessage } from "../components/messages/StatusMessage"
 import { CollapsedToolGroup } from "../components/messages/CollapsedToolGroup"
+import { OpenLocalLinkProvider } from "../components/messages/shared"
 import { CHAT_SELECTION_ZONE_ATTRIBUTE } from "./chatFocusPolicy"
 
 const SPECIAL_TOOL_NAMES = new Set(["AskUserQuestion", "ExitPlanMode", "TodoWrite"])
@@ -86,7 +87,7 @@ export function KannaTranscript({
 
   function renderMessage(message: HydratedTranscriptMessage, index: number): React.ReactNode {
     if (message.kind === "user_prompt") {
-      return <UserMessage key={message.id} content={message.content} onOpenLocalLink={onOpenLocalLink} />
+      return <UserMessage key={message.id} content={message.content} />
     }
 
     switch (message.kind) {
@@ -101,7 +102,7 @@ export function KannaTranscript({
         return isFirst ? <AccountInfoMessage key={message.id} message={message} /> : null
       }
       case "assistant_text":
-        return <TextMessage key={message.id} message={message} onOpenLocalLink={onOpenLocalLink} />
+        return <TextMessage key={message.id} message={message} />
       case "tool":
         if (message.toolKind === "ask_user_question") {
           return (
@@ -120,7 +121,6 @@ export function KannaTranscript({
               message={message}
               onConfirm={onExitPlanModeConfirm}
               isLatest={message.id === latestToolIds.ExitPlanMode}
-              onOpenLocalLink={onOpenLocalLink}
             />
           )
         }
@@ -151,14 +151,14 @@ export function KannaTranscript({
       case "context_cleared":
         return <ContextClearedMessage key={message.id} />
       case "compact_summary":
-        return <CompactSummaryMessage key={message.id} message={message} onOpenLocalLink={onOpenLocalLink} />
+        return <CompactSummaryMessage key={message.id} message={message} />
       case "status":
         return index === messages.length - 1 ? <StatusMessage key={message.id} message={message} /> : null
     }
   }
 
   return (
-    <>
+    <OpenLocalLinkProvider onOpenLocalLink={onOpenLocalLink}>
       {renderItems.map((item) => {
         if (item.type === "tool-group") {
           return (
@@ -185,6 +185,6 @@ export function KannaTranscript({
           </div>
         )
       })}
-    </>
+    </OpenLocalLinkProvider>
   )
 }

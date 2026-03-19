@@ -11,10 +11,9 @@ interface Props {
   message: Extract<ProcessedToolCall, { toolKind: "exit_plan_mode" }>
   onConfirm: (toolUseId: string, confirmed: boolean, clearContext?: boolean, message?: string) => void
   isLatest: boolean
-  onOpenLocalLink?: (target: { path: string; line?: number; column?: number }) => void
 }
 
-export function ExitPlanModeMessage({ message, onConfirm, isLatest, onOpenLocalLink }: Props) {
+export function ExitPlanModeMessage({ message, onConfirm, isLatest }: Props) {
   const isComplete = !!message.result
   const [expanded, setExpanded] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -73,7 +72,7 @@ export function ExitPlanModeMessage({ message, onConfirm, isLatest, onOpenLocalL
           )}
           {input?.plan ? (
             <div className="prose prose-sm dark:prose-invert max-w-none">
-              <Markdown remarkPlugins={[remarkGfm]} components={createMarkdownComponents({ onOpenLocalLink })}>
+              <Markdown remarkPlugins={[remarkGfm]} components={createMarkdownComponents()}>
                 {input.plan}
               </Markdown>
               <div className="mt-5" />

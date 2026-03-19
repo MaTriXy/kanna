@@ -6,17 +6,16 @@ import { MetaRow, MetaLabel, ExpandableRow, VerticalLineContainer, createMarkdow
 
 interface Props {
   message: ProcessedCompactSummaryMessage
-  onOpenLocalLink?: (target: { path: string; line?: number; column?: number }) => void
 }
 
-export function CompactSummaryMessage({ message, onOpenLocalLink }: Props) {
+export function CompactSummaryMessage({ message }: Props) {
   return (
     <MetaRow>
       <ExpandableRow
         expandedContent={
           <VerticalLineContainer className="my-4 text-xs">
             <div className="prose prose-sm dark:prose-invert max-w-none">
-              <ReactMarkdown remarkPlugins={[remarkGfm]} components={createMarkdownComponents({ onOpenLocalLink })}>
+              <ReactMarkdown remarkPlugins={[remarkGfm]} components={createMarkdownComponents()}>
                 {message.summary}
               </ReactMarkdown>
             </div>

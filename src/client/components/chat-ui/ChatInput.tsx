@@ -197,6 +197,18 @@ const ChatInputInner = forwardRef<HTMLTextAreaElement, Props>(function ChatInput
     element.style.height = `${element.scrollHeight}px`
   }, [])
 
+  const setTextareaRefs = useCallback((node: HTMLTextAreaElement | null) => {
+    textareaRef.current = node
+
+    if (!forwardedRef) return
+    if (typeof forwardedRef === "function") {
+      forwardedRef(node)
+      return
+    }
+
+    forwardedRef.current = node
+  }, [forwardedRef])
+
   useEffect(() => {
     autoResize()
   }, [value, autoResize])
@@ -209,15 +221,6 @@ const ChatInputInner = forwardRef<HTMLTextAreaElement, Props>(function ChatInput
   useEffect(() => {
     textareaRef.current?.focus()
   }, [chatId])
-
-  useEffect(() => {
-    if (!forwardedRef) return
-    if (typeof forwardedRef === "function") {
-      forwardedRef(textareaRef.current)
-      return
-    }
-    forwardedRef.current = textareaRef.current
-  }, [forwardedRef])
 
   function setReasoningEffort(reasoningEffort: string) {
     if (selectedProvider === "claude") {
@@ -285,7 +288,7 @@ const ChatInputInner = forwardRef<HTMLTextAreaElement, Props>(function ChatInput
     <div className={cn("p-3 pt-0 md:pb-2", isStandalone && "px-5 pb-5")}>
       <div className="flex items-end gap-2 max-w-[840px] mx-auto border dark:bg-card/40 backdrop-blur-lg border-border rounded-[29px] pr-1.5">
         <Textarea
-          ref={textareaRef}
+          ref={setTextareaRefs}
           placeholder="Build something..."
           value={value}
           autoFocus

@@ -95,7 +95,7 @@ function updateFocusReportingState(session: Pick<TerminalSession, "focusReportin
 }
 
 function filterFocusReportInput(data: string, allowFocusReporting: boolean) {
-  if (allowFocusReporting || (!data.includes(FOCUS_IN_SEQUENCE) && !data.includes(FOCUS_OUT_SEQUENCE))) {
+  if (allowFocusReporting) {
     return data
   }
 

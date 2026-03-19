@@ -4,6 +4,8 @@ export const RESTORE_CHAT_INPUT_FOCUS_EVENT = "kanna:restore-chat-input-focus"
 export const CHAT_INPUT_ATTRIBUTE = "data-chat-input"
 export const CHAT_SELECTION_ZONE_ATTRIBUTE = "data-chat-selection-zone"
 
+export type ChatFocusAction = "restore" | "escape-focus" | "none"
+
 type ElementLike = {
   closest?: (selector: string) => Element | null
   matches?: (selector: string) => boolean
@@ -44,14 +46,6 @@ export function hasActiveFocusOverlay(document: Document): boolean {
   return Boolean(document.querySelector(`[${FOCUS_FALLBACK_IGNORE_ATTRIBUTE}][data-state='open']`))
 }
 
-export function isChatInputTarget(element: Element | null): boolean {
-  return hasAttributeInTree(element, CHAT_INPUT_ATTRIBUTE)
-}
-
-export function isSelectionZoneTarget(element: Element | null): boolean {
-  return hasAttributeInTree(element, CHAT_SELECTION_ZONE_ATTRIBUTE)
-}
-
 export function hasActiveTextSelection(selection: Selection | null | undefined): boolean {
   if (!selection) return false
   return !selection.isCollapsed && selection.toString().trim().length > 0
@@ -74,49 +68,55 @@ export function focusNextChatInput(current: HTMLTextAreaElement | null, document
   return true
 }
 
-export function shouldFocusChatInputOnEscape(args: {
-  activeElement: Element | null
-  fallback: HTMLTextAreaElement | null
-  hasActiveOverlay: boolean
-  canCancel: boolean
-  defaultPrevented: boolean
-}): boolean {
-  const { activeElement, fallback, hasActiveOverlay, canCancel, defaultPrevented } = args
+export function resolveChatFocusAction(args:
+  | {
+    trigger: "escape"
+    activeElement: Element | null
+    fallback: HTMLTextAreaElement | null
+    hasActiveOverlay: boolean
+    canCancel: boolean
+    defaultPrevented: boolean
+  }
+  | {
+    trigger: "pointer"
+    activeElement: Element | null
+    pointerStartTarget: Element | null
+    pointerEndTarget: Element | null
+    root: RootLike | null
+    fallback: { disabled?: boolean } | null
+    hasActiveOverlay: boolean
+    hasActiveSelection: boolean
+  },
+): ChatFocusAction {
+  const { activeElement, fallback, hasActiveOverlay } = args
 
-  if (defaultPrevented) return false
-  if (!fallback || fallback.disabled) return false
-  if (hasActiveOverlay) return false
-  if (activeElement === fallback) return false
-  if (isChatInputTarget(activeElement)) return false
-  if (canCancel) return false
-  return true
-}
+  if (!fallback || fallback.disabled) return "none"
+  if (hasActiveOverlay) return "none"
+  if (activeElement === fallback) return "none"
 
-export function shouldRestoreChatInputFocus(args: {
-  activeElement: Element | null
-  pointerStartTarget: Element | null
-  pointerEndTarget: Element | null
-  root: RootLike | null
-  fallback: { disabled?: boolean } | null
-  hasActiveOverlay: boolean
-  hasActiveSelection: boolean
-}): boolean {
-  const { activeElement, pointerStartTarget, pointerEndTarget, root, fallback, hasActiveOverlay, hasActiveSelection } = args
+  if (args.trigger === "escape") {
+    if (args.defaultPrevented) return "none"
+    if (hasAttributeInTree(activeElement, CHAT_INPUT_ATTRIBUTE)) return "none"
+    if (args.canCancel) return "none"
+    return "escape-focus"
+  }
+
+  const { pointerStartTarget, pointerEndTarget, root, hasActiveSelection } = args
   const interactionTarget = pointerEndTarget ?? pointerStartTarget
 
-  if (!root || !fallback || fallback.disabled) return false
-  if (!interactionTarget || !root.contains(interactionTarget)) return false
-  if (hasAttributeInTree(interactionTarget, FOCUS_FALLBACK_IGNORE_ATTRIBUTE)) return false
-  if (hasActiveOverlay) return false
-  if (activeElement === fallback) return false
-  if (hasAttributeInTree(activeElement, FOCUS_FALLBACK_IGNORE_ATTRIBUTE)) return false
+  if (!root || !interactionTarget || !root.contains(interactionTarget)) return "none"
+  if (hasAttributeInTree(interactionTarget, FOCUS_FALLBACK_IGNORE_ATTRIBUTE)) return "none"
+  if (hasAttributeInTree(activeElement, FOCUS_FALLBACK_IGNORE_ATTRIBUTE)) return "none"
   if (
     hasActiveSelection
-    && (isSelectionZoneTarget(pointerStartTarget) || isSelectionZoneTarget(interactionTarget))
+    && (
+      hasAttributeInTree(pointerStartTarget, CHAT_SELECTION_ZONE_ATTRIBUTE)
+      || hasAttributeInTree(interactionTarget, CHAT_SELECTION_ZONE_ATTRIBUTE)
+    )
   ) {
-    return false
+    return "none"
   }
-  if (isTextEntryTarget(activeElement)) return false
-  if (activeElement && activeElement === interactionTarget) return true
-  return !isFocusableTarget(activeElement)
+  if (isTextEntryTarget(activeElement)) return "none"
+  if (activeElement && activeElement === interactionTarget) return "restore"
+  return isFocusableTarget(activeElement) ? "none" : "restore"
 }

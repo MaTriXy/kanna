@@ -3,8 +3,7 @@ import {
   hasActiveFocusOverlay,
   hasActiveTextSelection,
   RESTORE_CHAT_INPUT_FOCUS_EVENT,
-  shouldFocusChatInputOnEscape,
-  shouldRestoreChatInputFocus,
+  resolveChatFocusAction,
 } from "./chatFocusPolicy"
 
 interface StickyChatFocusOptions {
@@ -26,7 +25,8 @@ export function useStickyChatFocus({ rootRef, fallbackRef, enabled, canCancel }:
       const root = rootRef.current
       const fallback = fallbackRef.current
 
-      if (!shouldRestoreChatInputFocus({
+      if (resolveChatFocusAction({
+        trigger: "pointer",
         activeElement: document.activeElement,
         pointerStartTarget,
         pointerEndTarget: target,
@@ -34,7 +34,7 @@ export function useStickyChatFocus({ rootRef, fallbackRef, enabled, canCancel }:
         fallback,
         hasActiveOverlay: hasActiveFocusOverlay(document),
         hasActiveSelection: hasActiveTextSelection(window.getSelection()),
-      })) {
+      }) !== "restore") {
         pointerStartTarget = null
         return
       }
@@ -66,13 +66,14 @@ export function useStickyChatFocus({ rootRef, fallbackRef, enabled, canCancel }:
       if (event.key !== "Escape") return
 
       const fallback = fallbackRef.current
-      if (!shouldFocusChatInputOnEscape({
+      if (resolveChatFocusAction({
+        trigger: "escape",
         activeElement: document.activeElement,
         fallback,
         hasActiveOverlay: hasActiveFocusOverlay(document),
         canCancel,
         defaultPrevented: event.defaultPrevented,
-      })) {
+      }) !== "escape-focus") {
         return
       }
 
