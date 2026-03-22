@@ -19,6 +19,14 @@ import { markdownComponents } from "../components/messages/shared"
 import { buttonVariants } from "../components/ui/button"
 import type { EditorPreset } from "../../shared/protocol"
 import { SegmentedControl } from "../components/ui/segmented-control"
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../components/ui/select"
 import { useTheme, type ThemePreference } from "../hooks/useTheme"
 import { KEYBINDING_ACTION_LABELS, formatKeybindingInput, getResolvedKeybindings, parseKeybindingInput } from "../lib/keybindings"
 import { cn } from "../lib/utils"
@@ -577,17 +585,23 @@ export function SettingsPage() {
                         description="Used by the navbar code button and local file links in chat"
                         alignStart
                       >
-                        <select
+                        <Select
                           value={editorPreset}
-                          onChange={(event) => setEditorPreset(event.target.value as EditorPreset)}
-                          className="min-w-[180px] rounded-lg border border-border bg-background px-3 py-2 pr-12 text-sm text-foreground outline-none"
+                          onValueChange={(value) => setEditorPreset(value as EditorPreset)}
                         >
-                          {editorOptions.map((option) => (
-                            <option key={option.value} value={option.value}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
+                          <SelectTrigger className="min-w-[180px]">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              {editorOptions.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
                       </SettingsRow>
 
                       {editorPreset === "custom" ? (
