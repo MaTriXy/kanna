@@ -16,6 +16,26 @@ function normalizeGeneratedTitle(value: unknown): string | null {
   return normalized
 }
 
+function fallbackTitleFromMessage(messageContent: string): string | null {
+  const normalized = messageContent
+    .replace(/[`*_#>\-\[\]\(\)]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+
+  if (!normalized) return null
+
+  const sentence = normalized
+    .split(/[.!?]/)
+    .map((part) => part.trim())
+    .find(Boolean) ?? normalized
+
+  const clipped = sentence.slice(0, 48).trim()
+  if (!clipped) return null
+  if (clipped === "New Chat") return null
+
+  return clipped
+}
+
 export async function generateTitleForChat(
   messageContent: string,
   cwd: string,
@@ -32,5 +52,5 @@ export async function generateTitleForChat(
     },
   })
 
-  return result
+  return result ?? fallbackTitleFromMessage(messageContent)
 }

@@ -110,6 +110,19 @@ describe("generateTitleForChat", () => {
       })
     )
 
-    expect(title).toBeNull()
+    expect(title).toBe("hello")
+  })
+
+  test("falls back to a title derived from the first message when providers fail", async () => {
+    const title = await generateTitleForChat(
+      "Build a mobile sidebar that closes after chat selection.",
+      "/tmp/project",
+      new QuickResponseAdapter({
+        runClaudeStructured: async () => null,
+        runCodexStructured: async () => null,
+      })
+    )
+
+    expect(title).toBe("Build a mobile sidebar that closes after chat")
   })
 })
