@@ -1,4 +1,4 @@
-import { query, type CanUseTool, type PermissionResult, type Query } from "@anthropic-ai/claude-agent-sdk"
+import { query, type CanUseTool, type PermissionResult, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk"
 import type {
   AgentProvider,
   ChatAttachment,
@@ -64,11 +64,41 @@ interface ActiveTurn {
   cancelRecorded: boolean
 }
 
+interface ClaudeSessionHandle {
+  provider: "claude"
+  stream: AsyncIterable<HarnessEvent>
+  getAccountInfo?: () => Promise<any>
+  interrupt: () => Promise<void>
+  close: () => void
+  sendPrompt: (content: string) => Promise<void>
+  setModel: (model: string) => Promise<void>
+  setPermissionMode: (planMode: boolean) => Promise<void>
+}
+
+interface ClaudeSessionState {
+  chatId: string
+  session: ClaudeSessionHandle
+  localPath: string
+  model: string
+  effort?: string
+  planMode: boolean
+  sessionToken: string | null
+  accountInfoLoaded: boolean
+}
+
 interface AgentCoordinatorArgs {
   store: EventStore
   onStateChange: () => void
   codexManager?: CodexAppServerManager
   generateTitle?: (messageContent: string, cwd: string) => Promise<GenerateChatTitleResult>
+  startClaudeSession?: (args: {
+    localPath: string
+    model: string
+    effort?: string
+    planMode: boolean
+    sessionToken: string | null
+    onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
+  }) => Promise<ClaudeSessionHandle>
 }
 
 function timestamped<T extends Omit<TranscriptEntry, "_id" | "createdAt">>(
@@ -269,15 +299,61 @@ async function* createClaudeHarnessStream(q: Query): AsyncGenerator<HarnessEvent
   }
 }
 
-async function startClaudeTurn(args: {
-  content: string
+class AsyncMessageQueue<T> implements AsyncIterable<T> {
+  private readonly values: T[] = []
+  private readonly waiters: Array<(result: IteratorResult<T>) => void> = []
+  private closed = false
+
+  push(value: T) {
+    if (this.closed) {
+      throw new Error("Cannot push to a closed queue")
+    }
+
+    const waiter = this.waiters.shift()
+    if (waiter) {
+      waiter({ done: false, value })
+      return
+    }
+
+    this.values.push(value)
+  }
+
+  close() {
+    if (this.closed) return
+    this.closed = true
+    while (this.waiters.length > 0) {
+      const waiter = this.waiters.shift()
+      waiter?.({ done: true, value: undefined as never })
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {
+      next: async () => {
+        if (this.values.length > 0) {
+          return { done: false, value: this.values.shift() as T }
+        }
+
+        if (this.closed) {
+          return { done: true, value: undefined as never }
+        }
+
+        return await new Promise<IteratorResult<T>>((resolve) => {
+          this.waiters.push(resolve)
+        })
+      },
+    }
+  }
+}
+
+async function startClaudeSession(args: {
   localPath: string
   model: string
   effort?: string
   planMode: boolean
   sessionToken: string | null
   onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
-}): Promise<HarnessTurn> {
+}): Promise<ClaudeSessionHandle> {
   const canUseTool: CanUseTool = async (toolName, input, options) => {
     if (toolName !== "AskUserQuestion" && toolName !== "ExitPlanMode") {
       return {
@@ -333,8 +409,10 @@ async function startClaudeTurn(args: {
     } satisfies PermissionResult
   }
 
+  const promptQueue = new AsyncMessageQueue<SDKUserMessage>()
+
   const q = query({
-    prompt: args.content,
+    prompt: promptQueue,
     options: {
       cwd: args.localPath,
       model: args.model,
@@ -361,7 +439,25 @@ async function startClaudeTurn(args: {
     interrupt: async () => {
       await q.interrupt()
     },
+    sendPrompt: async (content: string) => {
+      promptQueue.push({
+        type: "user",
+        message: {
+          role: "user",
+          content,
+        },
+        parent_tool_use_id: null,
+        session_id: args.sessionToken ?? "",
+      })
+    },
+    setModel: async (model: string) => {
+      await q.setModel(model)
+    },
+    setPermissionMode: async (planMode: boolean) => {
+      await q.setPermissionMode(planMode ? "plan" : "acceptEdits")
+    },
     close: () => {
+      promptQueue.close()
       q.close()
     },
   }
@@ -372,14 +468,18 @@ export class AgentCoordinator {
   private readonly onStateChange: () => void
   private readonly codexManager: CodexAppServerManager
   private readonly generateTitle: (messageContent: string, cwd: string) => Promise<GenerateChatTitleResult>
+  private readonly startClaudeSessionFn: NonNullable<AgentCoordinatorArgs["startClaudeSession"]>
   private reportBackgroundError: ((message: string) => void) | null = null
   readonly activeTurns = new Map<string, ActiveTurn>()
+  readonly drainingStreams = new Map<string, { turn: HarnessTurn }>()
+  readonly claudeSessions = new Map<string, ClaudeSessionState>()
 
   constructor(args: AgentCoordinatorArgs) {
     this.store = args.store
     this.onStateChange = args.onStateChange
     this.codexManager = args.codexManager ?? new CodexAppServerManager()
     this.generateTitle = args.generateTitle ?? generateTitleForChatDetailed
+    this.startClaudeSessionFn = args.startClaudeSession ?? startClaudeSession
   }
 
   setBackgroundErrorReporter(report: ((message: string) => void) | null) {
@@ -398,6 +498,28 @@ export class AgentCoordinator {
     const pending = this.activeTurns.get(chatId)?.pendingTool
     if (!pending) return null
     return { toolUseId: pending.toolUseId, toolKind: pending.tool.toolKind }
+  }
+
+  getDrainingChatIds(): Set<string> {
+    return new Set(this.drainingStreams.keys())
+  }
+
+  async stopDraining(chatId: string) {
+    const draining = this.drainingStreams.get(chatId)
+    if (!draining) return
+    draining.turn.close()
+    this.drainingStreams.delete(chatId)
+    this.onStateChange()
+  }
+
+  async closeChat(chatId: string) {
+    await this.stopDraining(chatId)
+    const claudeSession = this.claudeSessions.get(chatId)
+    if (claudeSession) {
+      claudeSession.session.close()
+      this.claudeSessions.delete(chatId)
+    }
+    this.onStateChange()
   }
 
   private resolveProvider(command: Extract<ClientCommand, { type: "chat.send" }>, currentProvider: AgentProvider | null) {
@@ -438,6 +560,13 @@ export class AgentCoordinator {
     planMode: boolean
     appendUserPrompt: boolean
   }) {
+    // Close any lingering draining stream before starting a new turn.
+    const draining = this.drainingStreams.get(args.chatId)
+    if (draining) {
+      draining.turn.close()
+      this.drainingStreams.delete(args.chatId)
+    }
+
     const chat = this.store.requireChat(args.chatId)
     if (this.activeTurns.has(args.chatId)) {
       throw new Error("Chat is already running")
@@ -493,8 +622,8 @@ export class AgentCoordinator {
 
     let turn: HarnessTurn
     if (args.provider === "claude") {
-      turn = await startClaudeTurn({
-        content: buildPromptText(args.content, args.attachments),
+      turn = await this.startClaudeTurn({
+        chatId: args.chatId,
         localPath: project.localPath,
         model: args.model,
         effort: args.effort,
@@ -529,7 +658,7 @@ export class AgentCoordinator {
       effort: args.effort,
       serviceTier: args.serviceTier,
       planMode: args.planMode,
-      status: "starting",
+      status: args.provider === "claude" ? "running" : "starting",
       pendingTool: null,
       postToolFollowUp: null,
       hasFinalResult: false,
@@ -543,13 +672,91 @@ export class AgentCoordinator {
       void turn.getAccountInfo()
         .then(async (accountInfo) => {
           if (!accountInfo) return
+          if (args.provider === "claude") {
+            const session = this.claudeSessions.get(args.chatId)
+            if (session) {
+              if (session.accountInfoLoaded) return
+              session.accountInfoLoaded = true
+            } else {
+              return
+            }
+          }
           await this.store.appendMessage(args.chatId, timestamped({ kind: "account_info", accountInfo }))
           this.onStateChange()
         })
         .catch(() => undefined)
     }
 
+    if (args.provider === "claude") {
+      const session = this.claudeSessions.get(args.chatId)
+      if (!session) {
+        throw new Error("Claude session was not initialized")
+      }
+      await session.session.sendPrompt(buildPromptText(args.content, args.attachments))
+      return
+    }
+
     void this.runTurn(active)
+  }
+
+  private async startClaudeTurn(args: {
+    chatId: string
+    localPath: string
+    model: string
+    effort?: string
+    planMode: boolean
+    sessionToken: string | null
+    onToolRequest: (request: HarnessToolRequest) => Promise<unknown>
+  }): Promise<HarnessTurn> {
+    let session = this.claudeSessions.get(args.chatId)
+
+    if (!session || session.localPath !== args.localPath || session.effort !== args.effort) {
+      if (session) {
+        session.session.close()
+        this.claudeSessions.delete(args.chatId)
+      }
+
+      const started = await this.startClaudeSessionFn({
+        localPath: args.localPath,
+        model: args.model,
+        effort: args.effort,
+        planMode: args.planMode,
+        sessionToken: args.sessionToken,
+        onToolRequest: args.onToolRequest,
+      })
+
+      session = {
+        chatId: args.chatId,
+        session: started,
+        localPath: args.localPath,
+        model: args.model,
+        effort: args.effort,
+        planMode: args.planMode,
+        sessionToken: args.sessionToken,
+        accountInfoLoaded: false,
+      }
+      this.claudeSessions.set(args.chatId, session)
+      void this.runClaudeSession(session)
+    } else {
+      if (session.model !== args.model) {
+        await session.session.setModel(args.model)
+        session.model = args.model
+      }
+      if (session.planMode !== args.planMode) {
+        await session.session.setPermissionMode(args.planMode)
+        session.planMode = args.planMode
+      }
+    }
+
+    return {
+      provider: "claude",
+      stream: {
+        async *[Symbol.asyncIterator]() {},
+      },
+      getAccountInfo: session.session.getAccountInfo,
+      interrupt: session.session.interrupt,
+      close: () => {},
+    }
   }
 
   async send(command: Extract<ClientCommand, { type: "chat.send" }>) {
@@ -581,6 +788,66 @@ export class AgentCoordinator {
     return { chatId }
   }
 
+  private async runClaudeSession(session: ClaudeSessionState) {
+    try {
+      for await (const event of session.session.stream) {
+        if (event.type === "session_token" && event.sessionToken) {
+          session.sessionToken = event.sessionToken
+          await this.store.setSessionToken(session.chatId, event.sessionToken)
+          this.onStateChange()
+          continue
+        }
+
+        if (!event.entry) continue
+        await this.store.appendMessage(session.chatId, event.entry)
+
+        const active = this.activeTurns.get(session.chatId)
+        if (event.entry.kind === "system_init" && active) {
+          active.status = "running"
+        }
+
+        if (event.entry.kind === "result" && active) {
+          active.hasFinalResult = true
+          if (event.entry.isError) {
+            await this.store.recordTurnFailed(session.chatId, event.entry.result || "Turn failed")
+          } else if (!active.cancelRequested) {
+            await this.store.recordTurnFinished(session.chatId)
+          }
+          this.activeTurns.delete(session.chatId)
+        }
+
+        this.onStateChange()
+      }
+    } catch (error) {
+      const active = this.activeTurns.get(session.chatId)
+      if (active && !active.cancelRequested) {
+        const message = error instanceof Error ? error.message : String(error)
+        await this.store.appendMessage(
+          session.chatId,
+          timestamped({
+            kind: "result",
+            subtype: "error",
+            isError: true,
+            durationMs: 0,
+            result: message,
+          })
+        )
+        await this.store.recordTurnFailed(session.chatId, message)
+      }
+    } finally {
+      this.claudeSessions.delete(session.chatId)
+      const active = this.activeTurns.get(session.chatId)
+      if (active?.provider === "claude") {
+        if (active.cancelRequested && !active.cancelRecorded) {
+          await this.store.recordTurnCancelled(session.chatId)
+        }
+        this.activeTurns.delete(session.chatId)
+      }
+      session.session.close()
+      this.onStateChange()
+    }
+  }
+
   private async generateTitleInBackground(chatId: string, messageContent: string, cwd: string, expectedCurrentTitle: string) {
     try {
       const result = await this.generateTitle(messageContent, cwd)
@@ -607,6 +874,10 @@ export class AgentCoordinator {
   private async runTurn(active: ActiveTurn) {
     try {
       for await (const event of active.turn.stream) {
+        // Once cancelled, stop processing further stream events.
+        // cancel() already removed us from activeTurns and notified the UI.
+        if (active.cancelRequested) break
+
         if (event.type === "session_token" && event.sessionToken) {
           await this.store.setSessionToken(active.chatId, event.sessionToken)
           this.onStateChange()
@@ -627,6 +898,14 @@ export class AgentCoordinator {
           } else if (!active.cancelRequested) {
             await this.store.recordTurnFinished(active.chatId)
           }
+          // Remove from activeTurns as soon as the result arrives so the UI
+          // transitions to idle immediately. The stream may still be open
+          // (e.g. background tasks), but the user should be able to send
+          // new messages without having to hit stop first.
+          this.activeTurns.delete(active.chatId)
+          // Track the still-open stream so the UI can show a draining
+          // indicator and the user can stop background tasks.
+          this.drainingStreams.set(active.chatId, { turn: active.turn })
         }
 
         this.onStateChange()
@@ -651,7 +930,14 @@ export class AgentCoordinator {
         await this.store.recordTurnCancelled(active.chatId)
       }
       active.turn.close()
-      this.activeTurns.delete(active.chatId)
+      // Only remove if we're still the active turn for this chat.
+      // We may have already been removed by result handling or cancel(),
+      // and a new turn may have started for the same chatId.
+      if (this.activeTurns.get(active.chatId) === active) {
+        this.activeTurns.delete(active.chatId)
+      }
+      // Stream has fully ended — no longer draining.
+      this.drainingStreams.delete(active.chatId)
       this.onStateChange()
 
       if (active.postToolFollowUp && !active.cancelRequested) {
@@ -687,9 +973,18 @@ export class AgentCoordinator {
   }
 
   async cancel(chatId: string) {
+    // Also clean up any draining stream for this chat.
+    const draining = this.drainingStreams.get(chatId)
+    if (draining) {
+      draining.turn.close()
+      this.drainingStreams.delete(chatId)
+    }
+
     const active = this.activeTurns.get(chatId)
     if (!active) return
 
+    // Guard against concurrent cancel() calls — only the first one does work.
+    if (active.cancelRequested) return
     active.cancelRequested = true
 
     const pendingTool = active.pendingTool
@@ -715,14 +1010,23 @@ export class AgentCoordinator {
     active.cancelRecorded = true
     active.hasFinalResult = true
 
-    try {
-      await active.turn.interrupt()
-    } catch {
-      active.turn.close()
-    }
-
+    // Remove from activeTurns immediately so the UI reflects the cancellation
+    // right away, rather than waiting for interrupt() which may hang.
     this.activeTurns.delete(chatId)
     this.onStateChange()
+
+    // Now attempt to interrupt/close the underlying stream in the background.
+    // This is best-effort — the turn is already removed from active state above,
+    // and runTurn()'s finally block will also call close().
+    try {
+      await Promise.race([
+        active.turn.interrupt(),
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ])
+    } catch {
+      // interrupt() failed — force close
+    }
+    active.turn.close()
   }
 
   async respondTool(command: Extract<ClientCommand, { type: "chat.respondTool" }>) {

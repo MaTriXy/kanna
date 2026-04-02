@@ -21,6 +21,44 @@ async function waitFor(condition: () => boolean, timeoutMs = 2000) {
   }
 }
 
+class AsyncEventQueue<T> implements AsyncIterable<T> {
+  private readonly values: T[] = []
+  private readonly waiters: Array<(result: IteratorResult<T>) => void> = []
+  private closed = false
+
+  push(value: T) {
+    const waiter = this.waiters.shift()
+    if (waiter) {
+      waiter({ done: false, value })
+      return
+    }
+    this.values.push(value)
+  }
+
+  close() {
+    this.closed = true
+    while (this.waiters.length > 0) {
+      this.waiters.shift()?.({ done: true, value: undefined as never })
+    }
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<T> {
+    return {
+      next: async () => {
+        if (this.values.length > 0) {
+          return { done: false, value: this.values.shift() as T }
+        }
+        if (this.closed) {
+          return { done: true, value: undefined as never }
+        }
+        return await new Promise<IteratorResult<T>>((resolve) => {
+          this.waiters.push(resolve)
+        })
+      },
+    }
+  }
+}
+
 describe("normalizeClaudeStreamMessage", () => {
   test("normalizes assistant tool calls", () => {
     const entries = normalizeClaudeStreamMessage({
@@ -706,6 +744,370 @@ describe("AgentCoordinator codex integration", () => {
     expect(store.messages.some((entry) => entry.kind === "interrupted")).toBe(true)
   })
 
+  test("UI unblocks immediately when result arrives even if stream stays open", async () => {
+    let resolveStream!: () => void
+
+    const fakeCodexManager = {
+      async startSession() {},
+      async startTurn(): Promise<HarnessTurn> {
+        async function* stream() {
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "system_init",
+              provider: "codex",
+              model: "gpt-5.4",
+              tools: [],
+              agents: [],
+              slashCommands: [],
+              mcpServers: [],
+            }),
+          }
+          // Produce the result event
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "result",
+              subtype: "success",
+              isError: false,
+              durationMs: 120_000,
+              result: "done",
+            }),
+          }
+          // Stream stays open (simulates background tasks still running)
+          await new Promise<void>((resolve) => {
+            resolveStream = resolve
+          })
+        }
+
+        return {
+          provider: "codex",
+          stream: stream(),
+          interrupt: async () => {},
+          close: () => {
+            resolveStream?.()
+          },
+        }
+      },
+    }
+
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      codexManager: fakeCodexManager as never,
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "codex",
+      content: "run something with a background task",
+    })
+
+    // Wait for the result message to be persisted
+    await waitFor(() => store.messages.some((entry) => entry.kind === "result"))
+
+    // The active turn should be removed even though the stream is still open.
+    // This is the key assertion: the UI should show idle (not "Running...")
+    // so the user can send new messages without hitting stop.
+    expect(coordinator.getActiveStatuses().has("chat-1")).toBe(false)
+    expect(store.turnFinishedCount).toBe(1)
+
+    // The stream is still open, so it should be draining
+    expect(coordinator.getDrainingChatIds().has("chat-1")).toBe(true)
+
+    // Clean up the hanging stream
+    resolveStream()
+
+    // After the stream closes, draining should stop
+    await waitFor(() => !coordinator.getDrainingChatIds().has("chat-1"))
+  })
+
+  test("stopDraining closes the stream and removes from draining set", async () => {
+    let resolveStream!: () => void
+    let streamClosed = false
+
+    const fakeCodexManager = {
+      async startSession() {},
+      async startTurn(): Promise<HarnessTurn> {
+        async function* stream() {
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "system_init",
+              provider: "codex",
+              model: "gpt-5.4",
+              tools: [],
+              agents: [],
+              slashCommands: [],
+              mcpServers: [],
+            }),
+          }
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "result",
+              subtype: "success",
+              isError: false,
+              durationMs: 0,
+              result: "done",
+            }),
+          }
+          await new Promise<void>((resolve) => {
+            resolveStream = resolve
+          })
+        }
+
+        return {
+          provider: "codex",
+          stream: stream(),
+          interrupt: async () => {},
+          close: () => {
+            streamClosed = true
+            resolveStream?.()
+          },
+        }
+      },
+    }
+
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      codexManager: fakeCodexManager as never,
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "codex",
+      content: "work",
+    })
+
+    await waitFor(() => coordinator.getDrainingChatIds().has("chat-1"))
+
+    await coordinator.stopDraining("chat-1")
+
+    expect(coordinator.getDrainingChatIds().has("chat-1")).toBe(false)
+    expect(streamClosed).toBe(true)
+  })
+
+  test("cancel immediately removes active turn so UI shows idle", async () => {
+    let resolveInterrupt!: () => void
+    const interruptCalled = new Promise<void>((resolve) => {
+      resolveInterrupt = resolve
+    })
+    // interrupt() that hangs until we resolve it — simulating a slow SDK
+    let interruptDone = false
+
+    const fakeCodexManager = {
+      async startSession() {},
+      async startTurn(): Promise<HarnessTurn> {
+        async function* stream() {
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "system_init",
+              provider: "codex",
+              model: "gpt-5.4",
+              tools: [],
+              agents: [],
+              slashCommands: [],
+              mcpServers: [],
+            }),
+          }
+          // Stream that never ends (simulates the SDK hanging)
+          await new Promise(() => {})
+        }
+
+        return {
+          provider: "codex",
+          stream: stream(),
+          interrupt: async () => {
+            resolveInterrupt()
+            // Hang to simulate a slow interrupt
+            await new Promise<void>((resolve) => {
+              setTimeout(() => {
+                interruptDone = true
+                resolve()
+              }, 100)
+            })
+          },
+          close: () => {},
+        }
+      },
+    }
+
+    const stateChanges: number[] = []
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {
+        stateChanges.push(Date.now())
+      },
+      codexManager: fakeCodexManager as never,
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "codex",
+      content: "do something",
+    })
+
+    // Wait for the turn to be running
+    await waitFor(() => coordinator.getActiveStatuses().get("chat-1") === "running")
+
+    // Cancel — this should immediately remove from active turns
+    const cancelPromise = coordinator.cancel("chat-1")
+
+    // The turn should be removed from activeTurns immediately,
+    // BEFORE interrupt() resolves
+    await interruptCalled
+    expect(coordinator.getActiveStatuses().has("chat-1")).toBe(false)
+    expect(interruptDone).toBe(false) // interrupt is still in progress
+
+    await cancelPromise
+
+    // Verify only one "interrupted" message was appended
+    const interruptedMessages = store.messages.filter((entry) => entry.kind === "interrupted")
+    expect(interruptedMessages).toHaveLength(1)
+  })
+
+  test("concurrent cancel calls only produce a single interrupted message", async () => {
+    let resolveStream!: () => void
+
+    const fakeCodexManager = {
+      async startSession() {},
+      async startTurn(): Promise<HarnessTurn> {
+        async function* stream() {
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "system_init",
+              provider: "codex",
+              model: "gpt-5.4",
+              tools: [],
+              agents: [],
+              slashCommands: [],
+              mcpServers: [],
+            }),
+          }
+          await new Promise<void>((resolve) => {
+            resolveStream = resolve
+          })
+        }
+
+        return {
+          provider: "codex",
+          stream: stream(),
+          interrupt: async () => {
+            resolveStream()
+          },
+          close: () => {},
+        }
+      },
+    }
+
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      codexManager: fakeCodexManager as never,
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "codex",
+      content: "work",
+    })
+
+    await waitFor(() => coordinator.getActiveStatuses().get("chat-1") === "running")
+
+    // Fire multiple cancel calls concurrently (simulating repeated stop button clicks)
+    await Promise.all([
+      coordinator.cancel("chat-1"),
+      coordinator.cancel("chat-1"),
+      coordinator.cancel("chat-1"),
+    ])
+
+    // Only one "interrupted" message should exist
+    const interruptedMessages = store.messages.filter((entry) => entry.kind === "interrupted")
+    expect(interruptedMessages).toHaveLength(1)
+  })
+
+  test("runTurn stops processing events after cancel", async () => {
+    let resolveStream!: () => void
+
+    const fakeCodexManager = {
+      async startSession() {},
+      async startTurn(): Promise<HarnessTurn> {
+        async function* stream() {
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "system_init",
+              provider: "codex",
+              model: "gpt-5.4",
+              tools: [],
+              agents: [],
+              slashCommands: [],
+              mcpServers: [],
+            }),
+          }
+          // Wait for cancel, then yield another event that should be ignored
+          await new Promise<void>((resolve) => {
+            resolveStream = resolve
+          })
+          // This event arrives after cancel — should not be processed
+          yield {
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "assistant_text",
+              text: "this should be ignored after cancel",
+            }),
+          }
+        }
+
+        return {
+          provider: "codex",
+          stream: stream(),
+          interrupt: async () => {
+            resolveStream()
+          },
+          close: () => {},
+        }
+      },
+    }
+
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      codexManager: fakeCodexManager as never,
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "codex",
+      content: "work",
+    })
+
+    await waitFor(() => coordinator.getActiveStatuses().get("chat-1") === "running")
+
+    const messageCountBefore = store.messages.filter((entry) => entry.kind === "assistant_text").length
+    await coordinator.cancel("chat-1")
+
+    // Give the stream time to yield the extra event
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    const postCancelTextMessages = store.messages.filter((entry) => entry.kind === "assistant_text")
+    expect(postCancelTextMessages.length).toBe(messageCountBefore)
+  })
+
   test("cancelling a waiting codex exit-plan prompt discards it without starting a follow-up turn", async () => {
     let releaseInterrupt!: () => void
     const interrupted = new Promise<void>((resolve) => {
@@ -799,6 +1201,148 @@ describe("AgentCoordinator codex integration", () => {
     }
     expect(discardedResult.content).toEqual({ discarded: true })
     expect(startTurnCalls).toEqual(["plan this"])
+  })
+})
+
+describe("AgentCoordinator claude integration", () => {
+  test("reuses a persistent Claude session across turns", async () => {
+    const events = new AsyncEventQueue<any>()
+    const startSessionCalls: Array<{ model: string; planMode: boolean; sessionToken: string | null }> = []
+    const prompts: string[] = []
+
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async (args) => {
+        startSessionCalls.push({
+          model: args.model,
+          planMode: args.planMode,
+          sessionToken: args.sessionToken,
+        })
+
+        return {
+          provider: "claude",
+          stream: events,
+          getAccountInfo: async () => null,
+          interrupt: async () => {},
+          close: () => {},
+          setModel: async () => {},
+          setPermissionMode: async () => {},
+          sendPrompt: async (content: string) => {
+            prompts.push(content)
+            if (prompts.length === 1) {
+              events.push({ type: "session_token" as const, sessionToken: "claude-session-1" })
+              events.push({
+                type: "transcript" as const,
+                entry: timestamped({
+                  kind: "system_init",
+                  provider: "claude",
+                  model: "claude-opus-4-1",
+                  tools: [],
+                  agents: [],
+                  slashCommands: [],
+                  mcpServers: [],
+                }),
+              })
+            }
+            events.push({
+              type: "transcript" as const,
+              entry: timestamped({
+                kind: "result",
+                subtype: "success",
+                isError: false,
+                durationMs: 0,
+                result: "done",
+              }),
+            })
+          },
+        }
+      },
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "start background task",
+      model: "claude-opus-4-1",
+    })
+    await waitFor(() => store.turnFinishedCount === 1)
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "check task output",
+      model: "claude-opus-4-1",
+    })
+    await waitFor(() => store.turnFinishedCount === 2)
+
+    expect(startSessionCalls).toHaveLength(1)
+    expect(startSessionCalls[0]?.planMode).toBe(false)
+    expect(startSessionCalls[0]?.sessionToken).toBeNull()
+    expect(prompts).toEqual(["start background task", "check task output"])
+    expect(store.chat.sessionToken).toBe("claude-session-1")
+
+    events.close()
+  })
+
+  test("Claude final results clear running state without using draining mode", async () => {
+    const events = new AsyncEventQueue<any>()
+
+    const store = createFakeStore()
+    const coordinator = new AgentCoordinator({
+      store: store as never,
+      onStateChange: () => {},
+      startClaudeSession: async () => ({
+        provider: "claude",
+        stream: events,
+        getAccountInfo: async () => null,
+        interrupt: async () => {},
+        close: () => {},
+        setModel: async () => {},
+        setPermissionMode: async () => {},
+        sendPrompt: async () => {
+          events.push({
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "system_init",
+              provider: "claude",
+              model: "claude-opus-4-1",
+              tools: [],
+              agents: [],
+              slashCommands: [],
+              mcpServers: [],
+            }),
+          })
+          events.push({
+            type: "transcript" as const,
+            entry: timestamped({
+              kind: "result",
+              subtype: "success",
+              isError: false,
+              durationMs: 0,
+              result: "done",
+            }),
+          })
+        },
+      }),
+    })
+
+    await coordinator.send({
+      type: "chat.send",
+      chatId: "chat-1",
+      provider: "claude",
+      content: "run something",
+      model: "claude-opus-4-1",
+    })
+
+    await waitFor(() => store.turnFinishedCount === 1)
+    expect(coordinator.getActiveStatuses().has("chat-1")).toBe(false)
+    expect(coordinator.getDrainingChatIds().has("chat-1")).toBe(false)
+
+    events.close()
   })
 })
 
