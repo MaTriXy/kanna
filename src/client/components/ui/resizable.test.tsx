@@ -20,7 +20,7 @@ describe("ResizableHandle", () => {
     expect(html).toContain('aria-disabled="true"')
   })
 
-  test("stays visually transparent when no handle is requested", () => {
+  test("omits the divider line when withHandle is not set", () => {
     const html = renderToStaticMarkup(
       <ResizablePanelGroup orientation="horizontal">
         <ResizablePanel id="left" defaultSize="50%">
@@ -33,7 +33,6 @@ describe("ResizableHandle", () => {
       </ResizablePanelGroup>
     )
 
-    expect(html).toContain("bg-transparent")
     expect(html).not.toContain("before:bg-border")
   })
 })

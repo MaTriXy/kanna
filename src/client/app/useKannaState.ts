@@ -111,12 +111,8 @@ function useKannaSocket() {
 }
 
 function logKannaState(message: string, details?: unknown) {
-  if (details === undefined) {
-    console.info(`[useKannaState] ${message}`)
-    return
-  }
-
-  console.info(`[useKannaState] ${message}`, details)
+  void message
+  void details
 }
 
 function composerStateFromSendOptions(options?: {
@@ -780,10 +776,10 @@ export function useKannaState(activeChatId: string | null): KannaState {
     }
   }, [dialog, socket])
 
-  async function handleSend(
+  const handleSend = useCallback(async (
     content: string,
     options?: { provider?: AgentProvider; model?: string; modelOptions?: ModelOptions; planMode?: boolean; attachments?: import("../../shared/types").ChatAttachment[] }
-  ) {
+  ) => {
     try {
       let projectId = selectedProjectId ?? sidebarData.projectGroups[0]?.groupKey ?? null
       if (!activeChatId && !projectId && fallbackLocalProjectPath) {
@@ -827,7 +823,7 @@ export function useKannaState(activeChatId: string | null): KannaState {
       setCommandError(error instanceof Error ? error.message : String(error))
       throw error
     }
-  }
+  }, [activeChatId, fallbackLocalProjectPath, navigate, selectedProjectId, sidebarData.projectGroups, socket])
 
   const handleCancel = useCallback(async () => {
     if (!activeChatId) return

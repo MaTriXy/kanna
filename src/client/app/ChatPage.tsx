@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react"
 import { ArrowDown, Flower, Upload } from "lucide-react"
 import { useOutletContext } from "react-router-dom"
-import type { HydratedTranscriptMessage } from "../../shared/types"
+import type { ChatDiffSnapshot, HydratedTranscriptMessage } from "../../shared/types"
 import { ChatInput, type ChatInputHandle } from "../components/chat-ui/ChatInput"
 import { ChatNavbar } from "../components/chat-ui/ChatNavbar"
 import { RightSidebar } from "../components/chat-ui/RightSidebar"
@@ -13,6 +13,7 @@ import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from "../compone
 import { ScrollArea } from "../components/ui/scroll-area"
 import { actionMatchesEvent, getResolvedKeybindings } from "../lib/keybindings"
 import { cn } from "../lib/utils"
+import { deriveLatestContextWindowSnapshot, type ContextWindowSnapshot } from "../lib/contextWindow"
 import {
   DEFAULT_PROJECT_RIGHT_SIDEBAR_LAYOUT,
   RIGHT_SIDEBAR_MIN_SIZE_PERCENT,
@@ -35,6 +36,7 @@ const CHAT_NAVBAR_OFFSET_PX = 72
 const SCROLL_BUTTON_BOTTOM_PX = 120
 const TRANSCRIPT_TOC_BREAKPOINT_PX = 1200
 const DIFF_REFRESH_INTERVAL_MS = 5_000
+const EMPTY_DIFF_SNAPSHOT: ChatDiffSnapshot = { status: "unknown", files: [] }
 
 export interface TranscriptTocItem {
   id: string
@@ -89,6 +91,313 @@ export function scrollTranscriptMessageIntoView(
     behavior: "smooth",
   })
 }
+
+function sameContextWindowSnapshot(left: ContextWindowSnapshot | null, right: ContextWindowSnapshot | null) {
+  if (left === right) return true
+  if (!left || !right) return false
+  return left.usedTokens === right.usedTokens
+    && left.maxTokens === right.maxTokens
+    && left.remainingTokens === right.remainingTokens
+    && left.usedPercentage === right.usedPercentage
+    && left.remainingPercentage === right.remainingPercentage
+    && left.compactsAutomatically === right.compactsAutomatically
+    && left.updatedAt === right.updatedAt
+}
+
+interface ChatTranscriptViewportProps {
+  scrollRef: KannaState["scrollRef"]
+  messages: KannaState["messages"]
+  transcriptPaddingBottom: number
+  localPath: string | null | undefined
+  latestToolIds: KannaState["latestToolIds"]
+  isProcessing: boolean
+  runtimeStatus: string | null
+  isDraining: boolean
+  commandError: string | null
+  onStopDraining: () => void
+  onOpenLocalLink: KannaState["handleOpenLocalLink"]
+  onAskUserQuestionSubmit: KannaState["handleAskUserQuestion"]
+  onExitPlanModeConfirm: KannaState["handleExitPlanMode"]
+  chatAreaWidth: number
+  showTranscriptToc: boolean
+  transcriptTocItems: TranscriptTocItem[]
+  showScrollButton: boolean
+  onScrollChange: () => void
+  scrollToBottom: () => void
+  typedEmptyStateText: string
+  isEmptyStateTypingComplete: boolean
+  isPageFileDragActive: boolean
+}
+
+const ChatTranscriptViewport = memo(function ChatTranscriptViewport({
+  scrollRef,
+  messages,
+  transcriptPaddingBottom,
+  localPath,
+  latestToolIds,
+  isProcessing,
+  runtimeStatus,
+  isDraining,
+  commandError,
+  onStopDraining,
+  onOpenLocalLink,
+  onAskUserQuestionSubmit,
+  onExitPlanModeConfirm,
+  chatAreaWidth,
+  showTranscriptToc,
+  transcriptTocItems,
+  showScrollButton,
+  onScrollChange,
+  scrollToBottom,
+  typedEmptyStateText,
+  isEmptyStateTypingComplete,
+  isPageFileDragActive,
+}: ChatTranscriptViewportProps) {
+  const shouldShowTranscriptToc = shouldShowTranscriptTocPanel({
+    enabled: showTranscriptToc,
+    chatAreaWidth,
+    itemCount: transcriptTocItems.length,
+  })
+
+  return (
+    <>
+        <ScrollArea
+          ref={scrollRef}
+          onScroll={onScrollChange}
+          className="flex-1 min-h-0 px-3 scroll-pt-[72px]"
+        >
+          {messages.length === 0 ? <div style={{ height: transcriptPaddingBottom }} aria-hidden="true" /> : null}
+          {messages.length > 0 ? (
+            <>
+              <div className="animate-fade-in space-y-5 pt-[72px] max-w-[800px] mx-auto">
+                <KannaTranscript
+                  messages={messages}
+                  isLoading={isProcessing}
+                  localPath={localPath ?? undefined}
+                  latestToolIds={latestToolIds}
+                  onOpenLocalLink={onOpenLocalLink}
+                  onAskUserQuestionSubmit={onAskUserQuestionSubmit}
+                  onExitPlanModeConfirm={onExitPlanModeConfirm}
+                />
+                {isProcessing ? <ProcessingMessage status={runtimeStatus ?? undefined} /> : null}
+                {!isProcessing && isDraining ? (
+                  <DrainingIndicator onStop={() => void onStopDraining()} />
+                ) : null}
+                {commandError ? (
+                  <div className="text-sm text-destructive border border-destructive/20 bg-destructive/5 rounded-xl px-4 py-3">
+                    {commandError}
+                  </div>
+                ) : null}
+              </div>
+              <div style={{ height: 250 }} aria-hidden="true" />
+            </>
+          ) : null}
+        </ScrollArea>
+
+        {shouldShowTranscriptToc ? (
+          <div
+            className="absolute -mt-1 right-3 border border-border/0 border-[1px] z-20 bottom-0 overflow-y-auto pb-[110px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            style={{ top: CHAT_NAVBAR_OFFSET_PX }}
+          >
+            <div className=" pl-1 backdrop-blur-md" data-testid="transcript-toc">
+              <div className="flex flex-col items-end gap-[1px]">
+                {transcriptTocItems.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="flex max-w-[170px] items-center justify-end gap-1 rounded-xl px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                    onClick={() => {
+                      const container = scrollRef.current
+                      const target = document.getElementById(`msg-${item.id}`)
+                      if (!container || !target) {
+                        return
+                      }
+
+                      scrollTranscriptMessageIntoView(container, target)
+                    }}
+                    title={item.label}
+                  >
+                    <span className="min-w-0 truncate">{item.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {messages.length === 0 ? (
+          <div
+            className="pointer-events-none absolute inset-x-4 animate-fade-in"
+            style={{
+              top: CHAT_NAVBAR_OFFSET_PX,
+              bottom: transcriptPaddingBottom,
+            }}
+          >
+            <div className="mx-auto flex h-full max-w-[800px] items-center justify-center">
+              <div className="flex flex-col items-center justify-center text-muted-foreground gap-4 opacity-70">
+                <Flower strokeWidth={1.5} className="size-8 text-muted-foreground kanna-empty-state-flower" />
+                <div
+                  className="text-base font-normal text-muted-foreground text-center max-w-xs flex items-center kanna-empty-state-text"
+                  aria-label={EMPTY_STATE_TEXT}
+                >
+                  <span className="relative inline-grid place-items-start">
+                    <span className="invisible col-start-1 row-start-1 whitespace-pre flex items-center">
+                      <span>{EMPTY_STATE_TEXT}</span>
+                      <span className="kanna-typewriter-cursor-slot" aria-hidden="true" />
+                    </span>
+                    <span className="col-start-1 row-start-1 whitespace-pre flex items-center">
+                      <span>{typedEmptyStateText}</span>
+                      <span className="kanna-typewriter-cursor-slot" aria-hidden="true">
+                        <span
+                          className="kanna-typewriter-cursor"
+                          data-typing-complete={isEmptyStateTypingComplete ? "true" : "false"}
+                        />
+                      </span>
+                    </span>
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        {isPageFileDragActive ? (
+          <div className="absolute inset-0 z-30 pointer-events-none">
+            <div className="absolute inset-0 backdrop-blur-sm" />
+            <div className="absolute inset-6 ">
+              <div className="flex h-full items-center justify-center">
+                <div className="text-center flex flex-col items-center justify-center gap-3">
+                  <Upload className="mx-auto size-14 text-foreground" strokeWidth={1.75} />
+                  <div className="text-xl font-medium text-foreground">Drop up to 10 files</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        <div
+          style={{ bottom: SCROLL_BUTTON_BOTTOM_PX }}
+          className={cn(
+            "absolute left-1/2 -translate-x-1/2 z-10 transition-all",
+            showScrollButton
+              ? "scale-100 duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
+              : "scale-60 duration-300 ease-out pointer-events-none blur-sm opacity-0"
+          )}
+        >
+          <button
+            onClick={scrollToBottom}
+            className="flex items-center transition-colors gap-1.5 px-2 bg-white hover:bg-muted border border-border rounded-full aspect-square cursor-pointer text-sm text-primary hover:text-foreground dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-100 dark:border-slate-600"
+          >
+            <ArrowDown className="h-5 w-5" />
+          </button>
+        </div>
+    </>
+  )
+})
+
+interface ChatInputDockProps {
+  inputRef: RefObject<HTMLDivElement | null>
+  chatInputRef: RefObject<ChatInputHandle | null>
+  chatInputElementRef: RefObject<HTMLTextAreaElement | null>
+  activeChatId: string | null
+  hasSelectedProject: boolean
+  runtimeStatus: string | null
+  canCancel: boolean
+  projectId: string | null
+  activeProvider: "claude" | "codex" | null
+  availableProviders: KannaState["availableProviders"]
+  contextWindowSnapshot: ContextWindowSnapshot | null
+  onSubmit: KannaState["handleSend"]
+  onCancel: () => void
+}
+
+const ChatInputDock = memo(function ChatInputDock({
+  inputRef,
+  chatInputRef,
+  chatInputElementRef,
+  activeChatId,
+  hasSelectedProject,
+  runtimeStatus,
+  canCancel,
+  projectId,
+  activeProvider,
+  availableProviders,
+  contextWindowSnapshot,
+  onSubmit,
+  onCancel,
+}: ChatInputDockProps) {
+  return (
+    <div className="absolute bottom-0 left-0 right-0 z-20 pointer-events-none">
+      <div className="bg-gradient-to-t from-background via-background pointer-events-auto" ref={inputRef}>
+        <ChatInput
+          ref={chatInputRef}
+          inputElementRef={chatInputElementRef}
+          key={activeChatId ?? "new-chat"}
+          onSubmit={onSubmit}
+          onCancel={onCancel}
+          disabled={!hasSelectedProject || runtimeStatus === "waiting_for_user"}
+          canCancel={canCancel}
+          chatId={activeChatId}
+          projectId={projectId}
+          activeProvider={activeProvider}
+          availableProviders={availableProviders}
+          contextWindowSnapshot={contextWindowSnapshot}
+        />
+      </div>
+    </div>
+  )
+})
+
+interface TerminalWorkspaceShellProps {
+  projectId: string
+  fixedTerminalHeight: number
+  terminalLayout: ReturnType<typeof useTerminalLayoutStore.getState>["projects"][string]
+  addTerminal: ReturnType<typeof useTerminalLayoutStore.getState>["addTerminal"]
+  socket: KannaState["socket"]
+  connectionStatus: KannaState["connectionStatus"]
+  scrollback: number
+  minColumnWidth: number
+  splitTerminalShortcut?: string[]
+  focusRequestVersion: number
+  onTerminalCommandSent?: () => void
+  onRemoveTerminal: (projectId: string, terminalId: string) => void
+  onTerminalLayout: ReturnType<typeof useTerminalLayoutStore.getState>["setTerminalSizes"]
+}
+
+const TerminalWorkspaceShell = memo(function TerminalWorkspaceShell({
+  projectId,
+  fixedTerminalHeight,
+  terminalLayout,
+  addTerminal,
+  socket,
+  connectionStatus,
+  scrollback,
+  minColumnWidth,
+  splitTerminalShortcut,
+  focusRequestVersion,
+  onTerminalCommandSent,
+  onRemoveTerminal,
+  onTerminalLayout,
+}: TerminalWorkspaceShellProps) {
+  return (
+    <div style={fixedTerminalHeight > 0 ? { height: `${fixedTerminalHeight}px` } : undefined}>
+      <TerminalWorkspace
+        projectId={projectId}
+        layout={terminalLayout}
+        onAddTerminal={addTerminal}
+        socket={socket}
+        connectionStatus={connectionStatus}
+        scrollback={scrollback}
+        minColumnWidth={minColumnWidth}
+        splitTerminalShortcut={splitTerminalShortcut}
+        focusRequestVersion={focusRequestVersion}
+        onTerminalCommandSent={onTerminalCommandSent}
+        onRemoveTerminal={onRemoveTerminal}
+        onTerminalLayout={onTerminalLayout}
+      />
+    </div>
+  )
+})
 
 export function hasFileDragTypes(types: Iterable<string>) {
   return Array.from(types).includes("Files")
@@ -145,11 +454,16 @@ export function ChatPage() {
   const keybindings = state.keybindings
   const resolvedKeybindings = useMemo(() => getResolvedKeybindings(keybindings), [keybindings])
   const transcriptTocItems = useMemo(() => createTranscriptTocItems(state.messages), [state.messages])
-  const shouldShowTranscriptToc = shouldShowTranscriptTocPanel({
-    enabled: showTranscriptToc,
-    chatAreaWidth,
-    itemCount: transcriptTocItems.length,
-  })
+  const baseContextWindowSnapshotRef = useRef<ContextWindowSnapshot | null>(null)
+  const contextWindowSnapshot = useMemo(() => {
+    const derivedSnapshot = deriveLatestContextWindowSnapshot(state.chatSnapshot?.messages ?? [])
+    const previousSnapshot = baseContextWindowSnapshotRef.current
+    if (sameContextWindowSnapshot(previousSnapshot, derivedSnapshot)) {
+      return previousSnapshot
+    }
+    baseContextWindowSnapshotRef.current = derivedSnapshot
+    return derivedSnapshot
+  }, [state.chatSnapshot?.messages])
 
   const hasTerminals = terminalLayout.terminals.length > 0
   const showTerminalPane = Boolean(projectId && terminalLayout.isVisible && hasTerminals)
@@ -157,28 +471,6 @@ export function ChatPage() {
   const showRightSidebar = Boolean(projectId && rightSidebarLayout.isVisible)
   const shouldRenderRightSidebarLayout = Boolean(projectId)
 
-  useEffect(() => {
-    if (!state.activeChatId) return
-    if (!state.isProcessing && !showRightSidebar) return
-    console.info("[ChatPage] render state changed", {
-      activeChatId: state.activeChatId,
-      activeProjectId: projectId,
-      isProcessing: state.isProcessing,
-      showRightSidebar,
-      messageCount: state.messages.length,
-      runtimeStatus: state.runtime?.status ?? null,
-      diffStatus: state.chatDiffSnapshot?.status ?? null,
-      diffFileCount: state.chatDiffSnapshot?.files.length ?? 0,
-    })
-  }, [
-    projectId,
-    showRightSidebar,
-    state.activeChatId,
-    state.chatDiffSnapshot,
-    state.isProcessing,
-    state.messages.length,
-    state.runtime?.status,
-  ])
   const {
     isAnimating: isTerminalAnimating,
     mainPanelGroupRef,
@@ -280,6 +572,25 @@ export function ChatPage() {
       body: result.body,
     }
   }, [state.socket])
+
+  const handleCloseRightSidebar = useCallback(() => {
+    if (!projectId) return
+    toggleRightSidebar(projectId)
+  }, [projectId, toggleRightSidebar])
+  const handleToggleRightSidebar = useCallback(() => {
+    if (!projectId) return
+    toggleRightSidebar(projectId)
+  }, [projectId, toggleRightSidebar])
+  const handleCancel = useCallback(() => {
+    void state.handleCancel()
+  }, [state.handleCancel])
+  const handleOpenExternal = useCallback((action: "open_finder" | "open_editor" | "open_terminal") => {
+    void state.handleOpenExternal(action)
+  }, [state.handleOpenExternal])
+  const handleRemoveTerminal = useCallback((currentProjectId: string, terminalId: string) => {
+    void state.socket.command({ type: "terminal.close", terminalId }).catch(() => {})
+    removeTerminal(currentProjectId, terminalId)
+  }, [removeTerminal, state.socket])
 
   function hasDraggedFiles(event: React.DragEvent) {
     return hasFileDragTypes(event.dataTransfer?.types ?? [])
@@ -515,39 +826,47 @@ export function ChatPage() {
     return Math.max(RIGHT_SIDEBAR_MIN_SIZE_PERCENT, size)
   }
 
+  const handleTranscriptDragEnter = useCallback((event: React.DragEvent) => {
+    if (!hasDraggedFiles(event) || !state.hasSelectedProject) return
+    event.preventDefault()
+    pageFileDragDepthRef.current += 1
+    setIsPageFileDragActive(true)
+  }, [state.hasSelectedProject])
+
+  const handleTranscriptDragOver = useCallback((event: React.DragEvent) => {
+    if (!hasDraggedFiles(event) || !state.hasSelectedProject) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = "copy"
+    if (!isPageFileDragActive) {
+      setIsPageFileDragActive(true)
+    }
+  }, [isPageFileDragActive, state.hasSelectedProject])
+
+  const handleTranscriptDragLeave = useCallback((event: React.DragEvent) => {
+    if (!hasDraggedFiles(event) || !state.hasSelectedProject) return
+    event.preventDefault()
+    pageFileDragDepthRef.current = Math.max(0, pageFileDragDepthRef.current - 1)
+    if (pageFileDragDepthRef.current === 0) {
+      setIsPageFileDragActive(false)
+    }
+  }, [state.hasSelectedProject])
+
+  const handleTranscriptDrop = useCallback((event: React.DragEvent) => {
+    if (!hasDraggedFiles(event) || !state.hasSelectedProject) return
+    event.preventDefault()
+    pageFileDragDepthRef.current = 0
+    setIsPageFileDragActive(false)
+    enqueueDroppedFiles([...event.dataTransfer.files])
+  }, [state.hasSelectedProject])
+
   const chatCard = (
     <Card
       ref={chatCardRef}
       className="bg-background h-full flex flex-col overflow-hidden border-0 rounded-none relative"
-      onDragEnter={(event) => {
-        if (!hasDraggedFiles(event) || !state.hasSelectedProject) return
-        event.preventDefault()
-        pageFileDragDepthRef.current += 1
-        setIsPageFileDragActive(true)
-      }}
-      onDragOver={(event) => {
-        if (!hasDraggedFiles(event) || !state.hasSelectedProject) return
-        event.preventDefault()
-        event.dataTransfer.dropEffect = "copy"
-        if (!isPageFileDragActive) {
-          setIsPageFileDragActive(true)
-        }
-      }}
-      onDragLeave={(event) => {
-        if (!hasDraggedFiles(event) || !state.hasSelectedProject) return
-        event.preventDefault()
-        pageFileDragDepthRef.current = Math.max(0, pageFileDragDepthRef.current - 1)
-        if (pageFileDragDepthRef.current === 0) {
-          setIsPageFileDragActive(false)
-        }
-      }}
-      onDrop={(event) => {
-        if (!hasDraggedFiles(event) || !state.hasSelectedProject) return
-        event.preventDefault()
-        pageFileDragDepthRef.current = 0
-        setIsPageFileDragActive(false)
-        enqueueDroppedFiles([...event.dataTransfer.files])
-      }}
+      onDragEnter={handleTranscriptDragEnter}
+      onDragOver={handleTranscriptDragOver}
+      onDragLeave={handleTranscriptDragLeave}
+      onDrop={handleTranscriptDrop}
     >
       <CardContent className="flex flex-1 min-h-0 flex-col p-0 overflow-hidden relative">
         <ChatNavbar
@@ -559,176 +878,55 @@ export function ChatPage() {
           embeddedTerminalVisible={showTerminalPane}
           onToggleEmbeddedTerminal={projectId ? handleToggleEmbeddedTerminal : undefined}
           rightSidebarVisible={showRightSidebar}
-          onToggleRightSidebar={projectId ? () => toggleRightSidebar(projectId) : undefined}
-          onOpenExternal={(action) => {
-            void state.handleOpenExternal(action)
-          }}
+          onToggleRightSidebar={projectId ? handleToggleRightSidebar : undefined}
+          onOpenExternal={handleOpenExternal}
           editorLabel={state.editorLabel}
           finderShortcut={resolvedKeybindings.bindings.openInFinder}
           editorShortcut={resolvedKeybindings.bindings.openInEditor}
           terminalShortcut={resolvedKeybindings.bindings.toggleEmbeddedTerminal}
           rightSidebarShortcut={resolvedKeybindings.bindings.toggleRightSidebar}
         />
-
-        <ScrollArea
-          ref={state.scrollRef}
-          onScroll={state.updateScrollState}
-          className="flex-1 min-h-0 px-3 scroll-pt-[72px]"
-        >
-          {state.messages.length === 0 ? <div style={{ height: state.transcriptPaddingBottom }} aria-hidden="true" /> : null}
-          {state.messages.length > 0 ? (
-            <>
-              <div className="animate-fade-in space-y-5 pt-[72px] max-w-[800px] mx-auto">
-                <KannaTranscript
-                  messages={state.messages}
-                  isLoading={state.isProcessing}
-                  localPath={state.runtime?.localPath}
-                  latestToolIds={state.latestToolIds}
-                  onOpenLocalLink={state.handleOpenLocalLink}
-                  onAskUserQuestionSubmit={state.handleAskUserQuestion}
-                  onExitPlanModeConfirm={state.handleExitPlanMode}
-                />
-                {state.isProcessing ? <ProcessingMessage status={state.runtime?.status} /> : null}
-                {!state.isProcessing && state.isDraining ? (
-                  <DrainingIndicator onStop={() => void state.handleStopDraining()} />
-                ) : null}
-                {state.commandError ? (
-                  <div className="text-sm text-destructive border border-destructive/20 bg-destructive/5 rounded-xl px-4 py-3">
-                    {state.commandError}
-                  </div>
-                ) : null}
-              </div>
-              <div style={{ height: 250 }} aria-hidden="true" />
-            </>
-          ) : null}
-        </ScrollArea>
-
-        {shouldShowTranscriptToc ? (
-          <div
-            className="absolute -mt-1 right-3 border border-border/0 border-[1px] z-20 bottom-0 overflow-y-auto pb-[110px] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-            style={{ top: CHAT_NAVBAR_OFFSET_PX }}
-          >
-            <div
-              className=" pl-1 backdrop-blur-md"
-              data-testid="transcript-toc"
-            >
- 
-              <div className="flex flex-col items-end gap-[1px]">
-                {transcriptTocItems.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className="flex max-w-[170px] items-center justify-end gap-1 rounded-xl px-2 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-                    onClick={() => {
-                      const container = state.scrollRef.current
-                      const target = document.getElementById(`msg-${item.id}`)
-                      if (!container || !target) {
-                        return
-                      }
-
-                      scrollTranscriptMessageIntoView(container, target)
-                    }}
-                    title={item.label}
-                  >
-                    {/* <span className="opacity-60 font-semibold translate-y-[0.5px]">{item.order}.</span> */}
-                    <span className="min-w-0 truncate">{item.label}</span>
-                    {/* <ArrowUpRight className="size-3"/> */}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {state.messages.length === 0 ? (
-          <div
-            key={state.activeChatId ?? "new-chat"}
-            className="pointer-events-none absolute inset-x-4 animate-fade-in"
-            style={{
-              top: CHAT_NAVBAR_OFFSET_PX,
-              bottom: state.transcriptPaddingBottom,
-            }}
-          >
-            <div className="mx-auto flex h-full max-w-[800px] items-center justify-center">
-              <div className="flex flex-col items-center justify-center text-muted-foreground gap-4 opacity-70">
-                <Flower strokeWidth={1.5} className="size-8 text-muted-foreground kanna-empty-state-flower"></Flower>
-                <div
-                  className="text-base font-normal text-muted-foreground text-center max-w-xs flex items-center kanna-empty-state-text"
-                  aria-label={EMPTY_STATE_TEXT}
-                >
-                  <span className="relative inline-grid place-items-start">
-                    <span className="invisible col-start-1 row-start-1 whitespace-pre flex items-center">
-                      <span>{EMPTY_STATE_TEXT}</span>
-                      <span className="kanna-typewriter-cursor-slot" aria-hidden="true" />
-                    </span>
-                    <span className="col-start-1 row-start-1 whitespace-pre flex items-center">
-                      <span>{typedEmptyStateText}</span>
-                      <span className="kanna-typewriter-cursor-slot" aria-hidden="true">
-                        <span
-                          className="kanna-typewriter-cursor"
-                          data-typing-complete={isEmptyStateTypingComplete ? "true" : "false"}
-                        />
-                      </span>
-                    </span>
-                  </span>
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        {isPageFileDragActive ? (
-          <div className="absolute inset-0 z-30 pointer-events-none">
-            <div className="absolute inset-0 backdrop-blur-sm" />
-            <div className="absolute inset-6 ">
-              <div className="flex h-full items-center justify-center">
-                <div className="text-center flex flex-col items-center justify-center gap-3">
-                  <Upload className="mx-auto size-14 text-foreground" strokeWidth={1.75} />
-                  <div className="text-xl font-medium text-foreground">Drop up to 10 files</div>
-                </div>
-              </div>
-            </div>
-          </div>
-        ) : null}
-
-        <div
-          style={{ bottom: SCROLL_BUTTON_BOTTOM_PX }}
-          className={cn(
-            "absolute left-1/2 -translate-x-1/2 z-10 transition-all",
-            state.showScrollButton
-              ? "scale-100 duration-300 ease-[cubic-bezier(0.34,1.56,0.64,1)]"
-              : "scale-60 duration-300 ease-out pointer-events-none blur-sm opacity-0"
-          )}
-        >
-          <button
-            onClick={state.scrollToBottom}
-            className="flex items-center transition-colors gap-1.5 px-2 bg-white hover:bg-muted border border-border rounded-full aspect-square cursor-pointer text-sm text-primary hover:text-foreground dark:bg-slate-700 dark:hover:bg-slate-600 dark:text-slate-100 dark:border-slate-600"
-          >
-            <ArrowDown className="h-5 w-5" />
-          </button>
-        </div>
+        <ChatTranscriptViewport
+          scrollRef={state.scrollRef}
+          messages={state.messages}
+          transcriptPaddingBottom={state.transcriptPaddingBottom}
+          localPath={state.runtime?.localPath}
+          latestToolIds={state.latestToolIds}
+          isProcessing={state.isProcessing}
+          runtimeStatus={state.runtime?.status ?? null}
+          isDraining={state.isDraining}
+          commandError={state.commandError}
+          onStopDraining={state.handleStopDraining}
+          onOpenLocalLink={state.handleOpenLocalLink}
+          onAskUserQuestionSubmit={state.handleAskUserQuestion}
+          onExitPlanModeConfirm={state.handleExitPlanMode}
+          chatAreaWidth={chatAreaWidth}
+          showTranscriptToc={showTranscriptToc}
+          transcriptTocItems={transcriptTocItems}
+          showScrollButton={state.showScrollButton}
+          onScrollChange={state.updateScrollState}
+          scrollToBottom={state.scrollToBottom}
+          typedEmptyStateText={typedEmptyStateText}
+          isEmptyStateTypingComplete={isEmptyStateTypingComplete}
+          isPageFileDragActive={isPageFileDragActive}
+        />
       </CardContent>
 
-      <div className="absolute bottom-0 left-0 right-0 z-20 pointer-events-none">
-        <div className="bg-gradient-to-t from-background via-background pointer-events-auto" ref={state.inputRef}>
-          <ChatInput
-            ref={chatInputRef}
-            inputElementRef={chatInputElementRef}
-            key={state.activeChatId ?? "new-chat"}
-            onSubmit={state.handleSend}
-            onCancel={() => {
-              void state.handleCancel()
-            }}
-            disabled={!state.hasSelectedProject || state.runtime?.status === "waiting_for_user"}
-            canCancel={state.canCancel}
-            chatId={state.activeChatId}
-            projectId={projectId}
-            activeProvider={state.runtime?.provider ?? null}
-            availableProviders={state.availableProviders}
-            transcriptEntries={state.chatSnapshot?.messages ?? []}
-          />
-        </div>
-      </div>
+      <ChatInputDock
+        inputRef={state.inputRef}
+        chatInputRef={chatInputRef}
+        chatInputElementRef={chatInputElementRef}
+        activeChatId={state.activeChatId}
+        hasSelectedProject={state.hasSelectedProject}
+        runtimeStatus={state.runtime?.status ?? null}
+        canCancel={state.canCancel}
+        projectId={projectId}
+        activeProvider={state.runtime?.provider ?? null}
+        availableProviders={state.availableProviders}
+        contextWindowSnapshot={contextWindowSnapshot}
+        onSubmit={state.handleSend}
+        onCancel={handleCancel}
+      />
     </Card>
   )
 
@@ -804,10 +1002,11 @@ export function ChatPage() {
                     } as CSSProperties}
                   >
                     <div style={fixedTerminalHeight > 0 ? { height: `${fixedTerminalHeight}px` } : undefined}>
-                      <TerminalWorkspace
+                      <TerminalWorkspaceShell
                         projectId={projectId}
-                        layout={terminalLayout}
-                        onAddTerminal={addTerminal}
+                        fixedTerminalHeight={fixedTerminalHeight}
+                        terminalLayout={terminalLayout}
+                        addTerminal={addTerminal}
                         socket={state.socket}
                         connectionStatus={state.connectionStatus}
                         scrollback={scrollback}
@@ -815,10 +1014,7 @@ export function ChatPage() {
                         splitTerminalShortcut={resolvedKeybindings.bindings.addSplitTerminal}
                         focusRequestVersion={terminalFocusRequestVersion}
                         onTerminalCommandSent={scheduleTerminalDiffRefresh}
-                        onRemoveTerminal={(currentProjectId, terminalId) => {
-                          void state.socket.command({ type: "terminal.close", terminalId }).catch(() => {})
-                          removeTerminal(currentProjectId, terminalId)
-                        }}
+                        onRemoveTerminal={handleRemoveTerminal}
                         onTerminalLayout={setTerminalSizes}
                       />
                     </div>
@@ -853,7 +1049,7 @@ export function ChatPage() {
             >
               <RightSidebar
                 projectId={projectId}
-                diffs={state.chatDiffSnapshot ?? { status: "unknown", files: [] }}
+                diffs={state.chatDiffSnapshot ?? EMPTY_DIFF_SNAPSHOT}
                 diffRenderMode={diffRenderMode}
                 wrapLines={wrapDiffLines}
                 onOpenFile={handleOpenDiffFile}
@@ -861,7 +1057,7 @@ export function ChatPage() {
                 onCommit={handleCommitDiffs}
                 onDiffRenderModeChange={setDiffRenderMode}
                 onWrapLinesChange={setWrapDiffLines}
-                onClose={() => toggleRightSidebar(projectId)}
+                onClose={handleCloseRightSidebar}
               />
             </div>
           </ResizablePanel>
@@ -900,25 +1096,21 @@ export function ChatPage() {
                 "--terminal-toggle-duration": `${TERMINAL_TOGGLE_ANIMATION_DURATION_MS}ms`,
               } as CSSProperties}
             >
-              <div style={fixedTerminalHeight > 0 ? { height: `${fixedTerminalHeight}px` } : undefined}>
-                <TerminalWorkspace
-                  projectId={projectId}
-                  layout={terminalLayout}
-                  onAddTerminal={addTerminal}
-                  socket={state.socket}
-                  connectionStatus={state.connectionStatus}
-                  scrollback={scrollback}
-                  minColumnWidth={minColumnWidth}
-                  splitTerminalShortcut={resolvedKeybindings.bindings.addSplitTerminal}
-                  focusRequestVersion={terminalFocusRequestVersion}
-                  onTerminalCommandSent={scheduleTerminalDiffRefresh}
-                  onRemoveTerminal={(currentProjectId, terminalId) => {
-                    void state.socket.command({ type: "terminal.close", terminalId }).catch(() => {})
-                    removeTerminal(currentProjectId, terminalId)
-                  }}
-                  onTerminalLayout={setTerminalSizes}
-                />
-              </div>
+              <TerminalWorkspaceShell
+                projectId={projectId}
+                fixedTerminalHeight={fixedTerminalHeight}
+                terminalLayout={terminalLayout}
+                addTerminal={addTerminal}
+                socket={state.socket}
+                connectionStatus={state.connectionStatus}
+                scrollback={scrollback}
+                minColumnWidth={minColumnWidth}
+                splitTerminalShortcut={resolvedKeybindings.bindings.addSplitTerminal}
+                focusRequestVersion={terminalFocusRequestVersion}
+                onTerminalCommandSent={scheduleTerminalDiffRefresh}
+                onRemoveTerminal={handleRemoveTerminal}
+                onTerminalLayout={setTerminalSizes}
+              />
             </div>
           </ResizablePanel>
         </ResizablePanelGroup>

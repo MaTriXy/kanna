@@ -430,7 +430,7 @@ function RightSidebarImpl({
                 <p className="text-sm text-muted-foreground">No file changes.</p>
               </div>
             ) : (
-              <div className="space-y-1.5 p-1.5 pb-44 pr-0">
+              <div className="space-y-1.5 p-1.5 pb-44">
                 {diffs.files.map((file) => {
                   const isCollapsed = collapsedPaths[file.path] ?? true
                   const isChecked = checkedPaths[file.path] ?? true
@@ -457,10 +457,10 @@ function RightSidebarImpl({
               </div>
             )}
           </div>
-          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 p-3 pt-14">
-            <div className="absolute inset-x-0 bottom-0 top-0 bg-gradient-to-t from-background  to-transparent" />
-            <div className="pointer-events-auto relative mx-auto max-w-[750px]">
-              <div className="space-y-0">
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 p-3 pt-14 overflow-y-auto [scrollbar-gutter:stable]">
+            <div className="absolute inset-x-0 bottom-0 top-0 bg-gradient-to-t from-background to-transparent" />
+            <div className="pointer-events-auto relative mx-auto max-w-[550px]">
+              <div className="space-y-0 rounded-xl bg-background">
                 <Input
                   value={summary}
                   onChange={(event) => {

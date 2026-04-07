@@ -8,7 +8,6 @@ import {
   type CodexReasoningEffort,
   type ModelOptions,
   type ProviderCatalogEntry,
-  type TranscriptEntry,
   normalizeClaudeContextWindow,
   resolveClaudeContextWindowTokens,
 } from "../../../shared/types"
@@ -25,7 +24,7 @@ import { ContextWindowMeter } from "./ContextWindowMeter"
 import { AttachmentFileCard, AttachmentImageCard } from "../messages/AttachmentCard"
 import { AttachmentPreviewModal } from "../messages/AttachmentPreviewModal"
 import { classifyAttachmentPreview } from "../messages/attachmentPreview"
-import { deriveLatestContextWindowSnapshot, overrideContextWindowMaxTokens } from "../../lib/contextWindow"
+import { overrideContextWindowMaxTokens, type ContextWindowSnapshot } from "../../lib/contextWindow"
 
 const MAX_FILES_PER_DROP = 10
 const MAX_CONCURRENT_UPLOADS = 3
@@ -110,7 +109,7 @@ interface Props {
   inputElementRef?: React.Ref<HTMLTextAreaElement>
   activeProvider: AgentProvider | null
   availableProviders: ProviderCatalogEntry[]
-  transcriptEntries?: TranscriptEntry[]
+  contextWindowSnapshot?: ContextWindowSnapshot | null
 }
 
 export interface ChatInputHandle {
@@ -130,15 +129,6 @@ function withNormalizedContextWindow(
       contextWindow: normalizeClaudeContextWindow(model, state.modelOptions.contextWindow),
     },
   }
-}
-
-function logChatInput(message: string, details?: unknown) {
-  if (details === undefined) {
-    console.info(`[ChatInput] ${message}`)
-    return
-  }
-
-  console.info(`[ChatInput] ${message}`, details)
 }
 
 function getEffectiveComposerState(
@@ -175,7 +165,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   inputElementRef,
   activeProvider,
   availableProviders,
-  transcriptEntries = [],
+  contextWindowSnapshot = null,
 }, forwardedRef) {
   const {
     getDraft,
@@ -217,17 +207,16 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const providerConfig = availableProviders.find((provider) => provider.id === selectedProvider) ?? availableProviders[0]
   const showPlanMode = providerConfig?.supportsPlanMode ?? false
   const activeContextWindow = useMemo(() => {
-    const snapshot = deriveLatestContextWindowSnapshot(transcriptEntries)
     if (providerPrefs.provider !== "claude") {
-      return snapshot
+      return contextWindowSnapshot
     }
 
     const claudeModelOptions = providerPrefs.modelOptions as Extract<ComposerState, { provider: "claude" }>["modelOptions"]
     const stagedMaxTokens = resolveClaudeContextWindowTokens(
       normalizeClaudeContextWindow(providerPrefs.model, claudeModelOptions.contextWindow),
     )
-    return overrideContextWindowMaxTokens(snapshot, stagedMaxTokens)
-  }, [providerPrefs.model, providerPrefs.modelOptions, providerPrefs.provider, transcriptEntries])
+    return overrideContextWindowMaxTokens(contextWindowSnapshot, stagedMaxTokens)
+  }, [contextWindowSnapshot, providerPrefs.model, providerPrefs.modelOptions, providerPrefs.provider])
   const uploadedAttachments = attachments.filter((attachment) => attachment.status === "uploaded")
   const hasPendingUploads = attachments.some((attachment) => attachment.status === "uploading")
   const canSubmit = value.trim().length > 0 || uploadedAttachments.length > 0
@@ -325,19 +314,6 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       clearAttachmentDrafts(chatId)
     }
   }, [projectId, chatId, clearAttachments, clearAttachmentDrafts])
-
-  useEffect(() => {
-    logChatInput("resolved provider state", {
-      chatId: chatId ?? null,
-      activeProvider,
-      composerProvider: composerState.provider,
-      composerModel: composerState.model,
-      effectiveProvider: providerPrefs.provider,
-      effectiveModel: providerPrefs.model,
-      selectedProvider,
-      providerLocked,
-    })
-  }, [activeProvider, chatId, composerState.model, composerState.provider, providerLocked, providerPrefs.model, providerPrefs.provider, selectedProvider])
 
   useEffect(() => {
     attachmentsRef.current = attachments
@@ -521,13 +497,6 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       planMode: showPlanMode ? providerPrefs.planMode : false,
       attachments: attachmentsForSubmit,
     }
-    logChatInput("submit settings", {
-      chatId: chatId ?? null,
-      activeProvider,
-      composerProvider: providerPrefs.provider,
-      submitOptions,
-    })
-
     setValue("")
     if (chatId) clearDraft(chatId)
     if (textareaRef.current) textareaRef.current.style.height = "auto"

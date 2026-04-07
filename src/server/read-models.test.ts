@@ -106,4 +106,45 @@ describe("read models", () => {
       },
     ])
   })
+
+  test("orders sidebar chats by user-visible activity instead of internal updatedAt churn", () => {
+    const state = createEmptyState()
+    state.projectsById.set("project-1", {
+      id: "project-1",
+      localPath: "/tmp/project",
+      title: "Project",
+      createdAt: 1,
+      updatedAt: 1,
+    })
+    state.projectIdsByPath.set("/tmp/project", "project-1")
+    state.chatsById.set("chat-old", {
+      id: "chat-old",
+      projectId: "project-1",
+      title: "Older user activity",
+      createdAt: 10,
+      updatedAt: 500,
+      unread: false,
+      provider: "claude",
+      planMode: false,
+      sessionToken: null,
+      lastMessageAt: 100,
+      lastTurnOutcome: null,
+    })
+    state.chatsById.set("chat-new", {
+      id: "chat-new",
+      projectId: "project-1",
+      title: "Newer user activity",
+      createdAt: 20,
+      updatedAt: 50,
+      unread: false,
+      provider: "claude",
+      planMode: false,
+      sessionToken: null,
+      lastMessageAt: 200,
+      lastTurnOutcome: null,
+    })
+
+    const sidebar = deriveSidebarData(state, new Map())
+    expect(sidebar.projectGroups[0]?.chats.map((chat) => chat.chatId)).toEqual(["chat-new", "chat-old"])
+  })
 })

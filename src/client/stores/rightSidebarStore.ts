@@ -92,7 +92,7 @@ export const useRightSidebarStore = create<RightSidebarState>()(
 
 export const DEFAULT_PROJECT_RIGHT_SIDEBAR_LAYOUT: ProjectRightSidebarLayout = {
   isVisible: false,
-  size: RIGHT_SIDEBAR_MIN_SIZE_PERCENT,
+  size: 33,
 }
 
 export function getDefaultProjectRightSidebarLayout() {
