@@ -336,7 +336,7 @@ function KannaSidebarImpl({
                 navigate("/")
                 onClose()
               }}
-              className="size-10 rounded-lg"
+              className="size-10 rounded-lg hover:!border-border/0"
               title="New project"
             >
               <Plus className="size-4" />

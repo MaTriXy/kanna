@@ -3,6 +3,8 @@ import { measureElement, useVirtualizer } from "@tanstack/react-virtual"
 import { ArrowDown, Flower, Upload } from "lucide-react"
 import { useOutletContext } from "react-router-dom"
 import type {
+  BranchActionFailure,
+  BranchActionSuccess,
   ChatBranchListEntry,
   ChatBranchListResult,
   ChatCheckoutBranchResult,
@@ -13,6 +15,8 @@ import type {
   ChatSyncResult,
   DiffCommitMode,
   DiffCommitResult,
+  GitHubPublishInfo,
+  GitHubRepoAvailabilityResult,
 } from "../../shared/types"
 import { ChatInput, type ChatInputHandle } from "../components/chat-ui/ChatInput"
 import { ChatNavbar } from "../components/chat-ui/ChatNavbar"
@@ -611,6 +615,7 @@ export function ChatPage() {
   const pageFileDragDepthRef = useRef(0)
   const terminalDiffRefreshTimeoutRef = useRef<number | null>(null)
   const wasProcessingRef = useRef(false)
+  const lastProjectGitRefreshProjectIdRef = useRef<string | null>(null)
   const activeChatIdRef = useRef<string | null>(state.activeChatId)
   const projectPathRef = useRef<string | null>(state.runtime?.localPath ?? state.navbarLocalPath ?? null)
   const projectId = state.activeProjectId
@@ -713,6 +718,14 @@ export function ChatPage() {
   useEffect(() => {
     projectPathRef.current = state.runtime?.localPath ?? state.navbarLocalPath ?? null
   }, [state.navbarLocalPath, state.runtime?.localPath])
+
+  const refreshProjectGitSnapshot = useCallback(() => {
+    const chatId = activeChatIdRef.current
+    if (!chatId) {
+      return
+    }
+    void state.socket.command({ type: "chat.refreshDiffs", chatId }).catch(() => {})
+  }, [state.socket])
 
   const refreshDiffs = useCallback(() => {
     const chatId = activeChatIdRef.current
@@ -889,6 +902,113 @@ export function ChatPage() {
       body: result.body,
     }
   }, [state.socket])
+
+  const handleInitializeGit = useCallback(async () => {
+    const chatId = activeChatIdRef.current
+    if (!chatId) {
+      return null
+    }
+
+    try {
+      const result = await state.socket.command<BranchActionSuccess | BranchActionFailure>({
+        type: "chat.initGit",
+        chatId,
+      })
+      if (result.snapshotChanged) {
+        refreshProjectGitSnapshot()
+      }
+      if (!result.ok) {
+        await dialog.alert({
+          title: result.title,
+          description: `${result.message}${result.detail ? `\n\n${result.detail}` : ""}`,
+          closeLabel: "OK",
+        })
+      }
+      return result
+    } catch (error) {
+      await dialog.alert({
+        title: "Initialize git failed",
+        description: error instanceof Error ? error.message : String(error),
+        closeLabel: "OK",
+      })
+      return null
+    }
+  }, [dialog, refreshProjectGitSnapshot, state.socket])
+
+  const handleGetGitHubPublishInfo = useCallback(async () => {
+    const chatId = activeChatIdRef.current
+    if (!chatId) {
+      return {
+        ghInstalled: false,
+        authenticated: false,
+        owners: [],
+        suggestedRepoName: "my-repo",
+      } satisfies GitHubPublishInfo
+    }
+
+    return await state.socket.command<GitHubPublishInfo>({
+      type: "chat.getGitHubPublishInfo",
+      chatId,
+    })
+  }, [state.socket])
+
+  const handleCheckGitHubRepoAvailability = useCallback(async (args: { owner: string; name: string }) => {
+    const chatId = activeChatIdRef.current
+    if (!chatId) {
+      return {
+        available: false,
+        message: "No active chat.",
+      } satisfies GitHubRepoAvailabilityResult
+    }
+
+    return await state.socket.command<GitHubRepoAvailabilityResult>({
+      type: "chat.checkGitHubRepoAvailability",
+      chatId,
+      owner: args.owner,
+      name: args.name,
+    })
+  }, [state.socket])
+
+  const handleSetupGitHub = useCallback(async (args: {
+    owner: string
+    name: string
+    visibility: "public" | "private"
+    description: string
+  }) => {
+    const chatId = activeChatIdRef.current
+    if (!chatId) {
+      return null
+    }
+
+    try {
+      const result = await state.socket.command<BranchActionSuccess | BranchActionFailure>({
+        type: "chat.publishToGitHub",
+        chatId,
+        owner: args.owner,
+        name: args.name,
+        visibility: args.visibility,
+        description: args.description.trim() || undefined,
+      })
+      if (result.snapshotChanged) {
+        refreshProjectGitSnapshot()
+      }
+      if (!result.ok) {
+        await dialog.alert({
+          title: result.title,
+          description: `${result.message}${result.detail ? `\n\n${result.detail}` : ""}`,
+          closeLabel: "OK",
+        })
+      }
+      return result
+    } catch (error) {
+      await dialog.alert({
+        title: "Publish failed",
+        description: error instanceof Error ? error.message : String(error),
+        closeLabel: "OK",
+      })
+      return null
+    }
+  }, [dialog, refreshProjectGitSnapshot, state.socket])
 
   const handleListBranches = useCallback(async () => {
     const chatId = activeChatIdRef.current
@@ -1074,8 +1194,27 @@ export function ChatPage() {
   }, [projectId, toggleRightSidebar])
   const handleToggleRightSidebar = useCallback(() => {
     if (!projectId) return
+
+    if (state.chatDiffSnapshot?.status === "no_repo") {
+      void (async () => {
+        const confirmed = await dialog.confirm({
+          title: "Initialize Git?",
+          description: "Initialize a local git repository in this project?",
+          confirmLabel: "Init Git",
+          cancelLabel: "Cancel",
+        })
+        if (!confirmed) return
+
+        const result = await handleInitializeGit()
+        if (result?.ok && !showRightSidebar) {
+          toggleRightSidebar(projectId)
+        }
+      })()
+      return
+    }
+
     toggleRightSidebar(projectId)
-  }, [projectId, toggleRightSidebar])
+  }, [dialog, handleInitializeGit, projectId, showRightSidebar, state.chatDiffSnapshot?.status, toggleRightSidebar])
   const handleCancel = useCallback(() => {
     void state.handleCancel()
   }, [state.handleCancel])
@@ -1160,6 +1299,23 @@ export function ChatPage() {
 
       if (actionMatchesEvent(resolvedKeybindings, "toggleRightSidebar", event)) {
         event.preventDefault()
+        if (state.chatDiffSnapshot?.status === "no_repo") {
+          void (async () => {
+            const confirmed = await dialog.confirm({
+              title: "Initialize Git?",
+              description: "Initialize a local git repository in this project?",
+              confirmLabel: "Init Git",
+              cancelLabel: "Cancel",
+            })
+            if (!confirmed) return
+
+            const result = await handleInitializeGit()
+            if (result?.ok && !showRightSidebar) {
+              toggleRightSidebar(projectId)
+            }
+          })()
+          return
+        }
         toggleRightSidebar(projectId)
         return
       }
@@ -1184,7 +1340,7 @@ export function ChatPage() {
 
     window.addEventListener("keydown", handleGlobalKeydown)
     return () => window.removeEventListener("keydown", handleGlobalKeydown)
-  }, [addTerminal, handleToggleEmbeddedTerminal, projectId, resolvedKeybindings, toggleRightSidebar, toggleVisibility])
+  }, [addTerminal, dialog, handleInitializeGit, handleToggleEmbeddedTerminal, projectId, resolvedKeybindings, showRightSidebar, state.chatDiffSnapshot?.status, toggleRightSidebar, toggleVisibility])
 
   useEffect(() => {
     const frameId = window.requestAnimationFrame(() => {
@@ -1228,6 +1384,17 @@ export function ChatPage() {
 
     refreshDiffs()
   }, [projectId, refreshDiffs, showRightSidebar])
+
+  useEffect(() => {
+    if (!projectId || !state.activeChatId) {
+      return
+    }
+    if (lastProjectGitRefreshProjectIdRef.current === projectId) {
+      return
+    }
+    lastProjectGitRefreshProjectIdRef.current = projectId
+    refreshProjectGitSnapshot()
+  }, [projectId, refreshProjectGitSnapshot, state.activeChatId])
 
   useEffect(() => {
     if (!projectId || !showRightSidebar) {
@@ -1381,6 +1548,9 @@ export function ChatPage() {
           editorShortcut={resolvedKeybindings.bindings.openInEditor}
           terminalShortcut={resolvedKeybindings.bindings.toggleEmbeddedTerminal}
           rightSidebarShortcut={resolvedKeybindings.bindings.toggleRightSidebar}
+          branchName={state.chatDiffSnapshot?.branchName}
+          hasGitRepo={state.chatDiffSnapshot?.status !== "no_repo"}
+          gitStatus={state.chatDiffSnapshot?.status}
         />
         <ChatTranscriptViewport
           scrollRef={state.scrollRef}
@@ -1561,6 +1731,10 @@ export function ChatPage() {
                 onCheckoutBranch={handleCheckoutBranch}
                 onCreateBranch={handleCreateBranch}
                 onGenerateCommitMessage={handleGenerateCommitMessage}
+                onInitializeGit={handleInitializeGit}
+                onGetGitHubPublishInfo={handleGetGitHubPublishInfo}
+                onCheckGitHubRepoAvailability={handleCheckGitHubRepoAvailability}
+                onSetupGitHub={handleSetupGitHub}
                 onCommit={handleCommitDiffs}
                 onSyncWithRemote={handleSyncBranch}
                 onDiffRenderModeChange={setDiffRenderMode}

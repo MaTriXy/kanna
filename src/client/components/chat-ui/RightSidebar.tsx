@@ -1,5 +1,5 @@
 import { PatchDiff } from "@pierre/diffs/react"
-import { AlertTriangle, ArrowUp, Ban, Check, ChevronDown, ChevronUp, Code, Columns2, Copy, Download, Ellipsis, GitBranch, GitBranchPlus, GitMerge, GitPullRequest, LoaderCircle, Minus, PenLine, RefreshCw, Rows3, Search, Trash2, Upload, WrapText } from "lucide-react"
+import { AlertTriangle, ArrowUp, Ban, Building2, Check, ChevronDown, ChevronUp, Code, Columns2, Copy, Download, Ellipsis, FileText, GitBranch, GitBranchPlus, Github, GitMerge, GitPullRequest, Globe, LoaderCircle, Lock, Minus, PencilLine, PenLine, RefreshCw, Rows3, Search, Trash2, Upload, UserRound, WrapText } from "lucide-react"
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode, type RefObject } from "react"
 import type {
   ChatAttachment,
@@ -11,6 +11,8 @@ import type {
   DiffCommitResult,
   ChatMergeBranchResult,
   ChatMergePreviewResult,
+  GitHubPublishInfo,
+  GitHubRepoAvailabilityResult,
 } from "../../../shared/types"
 import { useStickyState } from "../../hooks/useStickyState"
 import { cn } from "../../lib/utils"
@@ -24,6 +26,7 @@ import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator,
 import { Input } from "../ui/input"
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover"
 import { SegmentedControl } from "../ui/segmented-control"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../ui/select"
 import { Textarea } from "../ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "../ui/tooltip"
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "../ui/dialog"
@@ -75,6 +78,10 @@ interface RightSidebarProps extends DiffFileActions {
   onCheckoutBranch: (branch: ChatBranchListEntry) => Promise<void>
   onCreateBranch: () => Promise<void>
   onGenerateCommitMessage: (args: { paths: string[] }) => Promise<{ subject: string; body: string }>
+  onInitializeGit: () => Promise<unknown>
+  onGetGitHubPublishInfo: () => Promise<GitHubPublishInfo>
+  onCheckGitHubRepoAvailability: (args: { owner: string; name: string }) => Promise<GitHubRepoAvailabilityResult>
+  onSetupGitHub: (args: { owner: string; name: string; visibility: "public" | "private"; description: string }) => Promise<unknown>
   onCommit: (args: { paths: string[]; summary: string; description: string; mode: DiffCommitMode }) => Promise<DiffCommitResult | null>
   onSyncWithRemote: (action: "fetch" | "pull" | "push" | "publish") => Promise<unknown>
   onDiffRenderModeChange: (mode: DiffRenderMode) => void
@@ -227,19 +234,19 @@ function CommitHistoryRow({ entry, isPendingPush = false }: { entry: ChatBranchH
       {entry.tags.length > 0 ? (
         <div className="flex shrink-0 flex-wrap justify-end gap-1">
           {entry.tags.map((tag) => (
-            <span key={tag} className="inline-flex items-center rounded-sm border border-text-muted-foreground px-2 py-0.5 text-[11px] text-muted-foreground">
+            <span key={tag} className="inline-flex items-center rounded-sm border border-text-muted-foreground px-2 py-0.5 text-[11px]">
               {tag}
             </span>
           ))}
           {isPendingPush ? (
-            <span className="inline-flex items-center rounded-sm border border-text-muted-foreground px-2 py-0.5 text-[11px] text-muted-foreground">
+            <span className="inline-flex items-center rounded-sm border border-text-muted-foreground px-2 py-0.5 text-[11px]">
               <ArrowUp className="size-3" />
             </span>
           ) : null}
         </div>
       ) : isPendingPush ? (
         <div className="flex shrink-0 flex-wrap justify-end gap-1">
-          <span className="inline-flex items-center rounded-sm border border-text-muted-foreground px-2 py-0.5 text-[11px] text-muted-foreground">
+          <span className="inline-flex items-center rounded-sm border border-text-muted-foreground px-2 py-0.5 text-[11px]">
             <ArrowUp className="size-3" />
           </span>
         </div>
@@ -307,6 +314,257 @@ function getMergeBranchGroups(branchList: ChatBranchListResult, currentBranchNam
     recent,
     other,
   }
+}
+
+function GitHubPublishModal({
+  open,
+  onOpenChange,
+  onGetGitHubPublishInfo,
+  onCheckGitHubRepoAvailability,
+  onPublish,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  onGetGitHubPublishInfo: () => Promise<GitHubPublishInfo>
+  onCheckGitHubRepoAvailability: (args: { owner: string; name: string }) => Promise<GitHubRepoAvailabilityResult>
+  onPublish: (args: { owner: string; name: string; visibility: "public" | "private"; description: string }) => Promise<unknown>
+}) {
+  const [info, setInfo] = useState<GitHubPublishInfo | null>(null)
+  const [isLoadingInfo, setIsLoadingInfo] = useState(false)
+  const [owner, setOwner] = useState("")
+  const [name, setName] = useState("")
+  const [visibility, setVisibility] = useState<"public" | "private">("private")
+  const [description, setDescription] = useState("")
+  const [availability, setAvailability] = useState<GitHubRepoAvailabilityResult | null>(null)
+  const [isCheckingAvailability, setIsCheckingAvailability] = useState(false)
+  const [isPublishing, setIsPublishing] = useState(false)
+
+  useEffect(() => {
+    if (!open) return
+    let cancelled = false
+    setIsLoadingInfo(true)
+    setAvailability(null)
+    void onGetGitHubPublishInfo()
+      .then((result) => {
+        if (cancelled) return
+        setInfo(result)
+        setOwner(result.owners[0] ?? result.activeAccountLogin ?? "")
+        setName(result.suggestedRepoName)
+        setVisibility("private")
+        setDescription("")
+      })
+      .finally(() => {
+        if (cancelled) return
+        setIsLoadingInfo(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [onGetGitHubPublishInfo, open])
+
+  useEffect(() => {
+    if (!open || !info?.ghInstalled || !info.authenticated) {
+      return
+    }
+    const trimmedOwner = owner.trim()
+    const trimmedName = name.trim()
+    if (!trimmedOwner || !trimmedName) {
+      setAvailability(null)
+      return
+    }
+
+    let cancelled = false
+    setIsCheckingAvailability(true)
+    const timeoutId = window.setTimeout(() => {
+      void onCheckGitHubRepoAvailability({ owner: trimmedOwner, name: trimmedName })
+        .then((result) => {
+          if (cancelled) return
+          setAvailability(result)
+        })
+        .finally(() => {
+          if (cancelled) return
+          setIsCheckingAvailability(false)
+        })
+    }, 250)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timeoutId)
+    }
+  }, [info?.authenticated, info?.ghInstalled, name, onCheckGitHubRepoAvailability, open, owner])
+
+  async function handlePublish() {
+    if (!owner.trim() || !name.trim()) return
+    setIsPublishing(true)
+    try {
+      const result = await onPublish({
+        owner: owner.trim(),
+        name: name.trim(),
+        visibility,
+        description,
+      })
+      if ((result as { ok?: boolean } | null)?.ok) {
+        onOpenChange(false)
+      }
+    } finally {
+      setIsPublishing(false)
+    }
+  }
+
+  const canPublish = Boolean(
+    info?.ghInstalled
+    && info.authenticated
+    && owner.trim()
+    && name.trim()
+    && availability?.available
+    && !isCheckingAvailability
+    && !isPublishing
+  )
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent size="sm" className="max-w-[min(92vw,475px)]">
+        <DialogBody className="space-y-2 px-4 pb-4 pt-4">
+          <div className="space-y-1">
+            <DialogTitle>Push to GitHub</DialogTitle>
+            <DialogDescription>Create a GitHub repository from this local project using GitHub CLI.</DialogDescription>
+          </div>
+          {isLoadingInfo ? (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <LoaderCircle className="size-4 animate-spin" />
+              <span>Checking GitHub CLI…</span>
+            </div>
+          ) : info && !info.ghInstalled ? (
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>GitHub CLI is not installed.</p>
+              <div className="rounded-lg border border-border px-3 py-2 font-mono text-xs text-foreground">
+                brew install gh
+              </div>
+              <p>Then run:</p>
+              <div className="rounded-lg border border-border px-3 py-2 font-mono text-xs text-foreground">
+                gh auth login
+              </div>
+            </div>
+          ) : info && !info.authenticated ? (
+            <div className="space-y-2 text-sm text-muted-foreground">
+              <p>GitHub CLI is installed but not signed in.</p>
+              <div className="rounded-lg border border-border px-3 py-2 font-mono text-xs text-foreground">
+                gh auth login
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="space-y-2">
+                <Select value={owner} onValueChange={setOwner}>
+                  <SelectTrigger className="pl-[11px] [&>span]:flex [&>span]:items-center [&>span]:gap-2">
+                    <SelectValue placeholder="Select owner" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(info?.owners ?? []).map((candidate) => (
+                      <SelectItem key={candidate} value={candidate}>
+                        <span className="flex items-center gap-2">
+                          {candidate === info?.activeAccountLogin ? (
+                            <UserRound className="size-4 text-muted-foreground" />
+                          ) : (
+                            <Building2 className="size-4 text-muted-foreground" />
+                          )}
+                          <span className="pl-[1px]">{candidate}</span>
+                        </span>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-2">
+                <div className="relative">
+                  <Input
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="my-repo"
+                    className="pl-9 pr-10"
+                  />
+                  <PencilLine className="pointer-events-none absolute inset-y-0 left-3 my-auto size-4 text-muted-foreground" />
+                  {isCheckingAvailability ? (
+                    <div className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-muted-foreground">
+                      <LoaderCircle className="size-4 animate-spin" />
+                    </div>
+                  ) : availability ? (
+                    <div className="absolute inset-y-0 right-2 flex items-center">
+                      <Tooltip delayDuration={0}>
+                        <TooltipTrigger asChild>
+                          <button
+                            type="button"
+                            tabIndex={-1}
+                            aria-label={availability.message}
+                            className={cn(
+                              "flex size-6 items-center justify-center rounded-md",
+                              availability.available
+                                ? "text-emerald-600 dark:text-emerald-400"
+                                : "text-destructive"
+                            )}
+                          >
+                            {availability.available ? <Check className="size-4" /> : <AlertTriangle className="size-4" />}
+                          </button>
+                        </TooltipTrigger>
+                        <TooltipContent>{availability.message}</TooltipContent>
+                      </Tooltip>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="relative">
+                  <FileText className="pointer-events-none absolute left-3 top-3 size-4 text-muted-foreground" />
+                  <Textarea
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                    rows={3}
+                    placeholder="Optional description"
+                    className="pl-9 outline-none focus:outline-none focus-visible:outline-none focus:ring-0 focus-visible:ring-0"
+                  />
+                </div>
+              </div>
+              <div className="space-y-2">
+                <Select value={visibility} onValueChange={(value) => setVisibility(value as "public" | "private")}>
+                  <SelectTrigger className="pl-[11px] [&>span]:flex [&>span]:items-center [&>span]:gap-2">
+                    <SelectValue placeholder="Select visibility" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="private">
+                      <span className="flex items-center gap-2">
+                        <Lock className="size-4 text-muted-foreground" />
+                        <span className="pl-[1px]">Private</span>
+                      </span>
+                    </SelectItem>
+                    <SelectItem value="public">
+                      <span className="flex items-center gap-2">
+                        <Globe className="size-4 text-muted-foreground" />
+                        <span className="pl-[1px]">Public</span>
+                      </span>
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </>
+          )}
+        </DialogBody>
+        <DialogFooter>
+          <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button size="sm" disabled={!canPublish} onClick={() => void handlePublish()}>
+            {isPublishing ? (
+              <>
+                <LoaderCircle className="mr-1.5 size-3.5 animate-spin" />
+                Publishing…
+              </>
+            ) : (
+              "Push to GitHub"
+            )}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  )
 }
 
 function BranchSearchInput({
@@ -1098,6 +1356,10 @@ function RightSidebarImpl({
   onCheckoutBranch,
   onCreateBranch,
   onGenerateCommitMessage,
+  onInitializeGit,
+  onGetGitHubPublishInfo,
+  onCheckGitHubRepoAvailability,
+  onSetupGitHub,
   onCommit,
   onSyncWithRemote,
   onLoadPatch,
@@ -1116,6 +1378,7 @@ function RightSidebarImpl({
   const [isGenerating, setIsGenerating] = useState(false)
   const [commitModeInFlight, setCommitModeInFlight] = useState<DiffCommitMode | null>(null)
   const [isSyncing, setIsSyncing] = useState(false)
+  const [isGitHubPublishModalOpen, setIsGitHubPublishModalOpen] = useState(false)
   const [patchesByPath, setPatchesByPath] = useState<Record<string, string>>({})
   const [patchErrorsByPath, setPatchErrorsByPath] = useState<Record<string, string>>({})
   const [loadingPatchPaths, setLoadingPatchPaths] = useState<Record<string, boolean>>({})
@@ -1186,6 +1449,7 @@ function RightSidebarImpl({
   const aheadCount = diffs.aheadCount ?? 0
   const isPublishedBranch = diffs.hasUpstream === true
   const isPublishableBranch = diffs.hasUpstream === false && Boolean(diffs.branchName)
+  const hasRemoteOrigin = Boolean(diffs.originRepoSlug)
   const encodedBranchName = diffs.branchName
     ? diffs.branchName.split("/").map((segment) => encodeURIComponent(segment)).join("/")
     : null
@@ -1309,7 +1573,7 @@ function RightSidebarImpl({
   return (
     <div className="h-full min-h-0 border-l border-border bg-background md:min-w-[370px]">
       <div className="flex h-full min-h-0 flex-col">
-        <div className="flex shrink-0 items-center gap-2 border-b border-border pl-2.5 pr-3 py-2">
+        <div className="flex shrink-0 items-center gap-2 border-b border-border pl-2.5 pr-2 py-2">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <BranchSwitcher
               currentBranchName={diffs.branchName}
@@ -1321,7 +1585,17 @@ function RightSidebarImpl({
             />
           </div>
           {diffs.status === "ready" ? (
-            syncAction === "publish" ? (
+            !hasRemoteOrigin ? (
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => setIsGitHubPublishModalOpen(true)}
+                className="h-7 gap-1.5 px-3 text-xs"
+              >
+                <Github className="h-3.5 w-3.5" />
+                <span>Push to GitHub</span>
+              </Button>
+            ) : syncAction === "publish" ? (
               <Button
                 variant="ghost"
                 size="sm"
@@ -1470,7 +1744,12 @@ function RightSidebarImpl({
           <div ref={scrollContainerRef} className="h-full overflow-y-auto [scrollbar-gutter:stable]">
             {diffs.status === "no_repo" ? (
               <div className="flex h-full items-center justify-center px-6 py-3 text-center">
-                <p className="text-sm text-muted-foreground">Open a git repo to view current file diffs.</p>
+                <div className="flex max-w-[280px] flex-col items-center gap-3">
+                  <p className="text-sm text-muted-foreground">Initialize git here to start tracking branches, diffs, and history.</p>
+                  <Button size="sm" onClick={() => void onInitializeGit()}>
+                    Init Git
+                  </Button>
+                </div>
               </div>
             ) : viewMode === "history" ? (
               branchHistory.length === 0 ? (
@@ -1618,6 +1897,13 @@ function RightSidebarImpl({
             </div>
           ) : null}
         </div>
+        <GitHubPublishModal
+          open={isGitHubPublishModalOpen}
+          onOpenChange={setIsGitHubPublishModalOpen}
+          onGetGitHubPublishInfo={onGetGitHubPublishInfo}
+          onCheckGitHubRepoAvailability={onCheckGitHubRepoAvailability}
+          onPublish={onSetupGitHub}
+        />
       </div>
     </div>
   )

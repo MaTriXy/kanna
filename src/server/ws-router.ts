@@ -22,7 +22,7 @@ export interface ClientState {
 
 interface CreateWsRouterArgs {
   store: EventStore
-  diffStore?: Pick<DiffStore, "getProjectSnapshot" | "refreshSnapshot" | "listBranches" | "previewMergeBranch" | "mergeBranch" | "syncBranch" | "checkoutBranch" | "createBranch" | "generateCommitMessage" | "commitFiles" | "discardFile" | "ignoreFile" | "readPatch">
+  diffStore?: Pick<DiffStore, "getProjectSnapshot" | "refreshSnapshot" | "initializeGit" | "getGitHubPublishInfo" | "checkGitHubRepoAvailability" | "publishToGitHub" | "listBranches" | "previewMergeBranch" | "mergeBranch" | "syncBranch" | "checkoutBranch" | "createBranch" | "generateCommitMessage" | "commitFiles" | "discardFile" | "ignoreFile" | "readPatch">
   agent: AgentCoordinator
   terminals: TerminalManager
   keybindings: KeybindingsManager
@@ -59,6 +59,10 @@ export function createWsRouter({
   const resolvedDiffStore = diffStore ?? {
     getProjectSnapshot: () => ({ status: "unknown", branchName: undefined, defaultBranchName: undefined, originRepoSlug: undefined, hasUpstream: undefined, aheadCount: undefined, behindCount: undefined, lastFetchedAt: undefined, files: [] as const, branchHistory: { entries: [] as const } }),
     refreshSnapshot: async () => false,
+    initializeGit: async () => ({ ok: true, branchName: undefined, snapshotChanged: false }),
+    getGitHubPublishInfo: async () => ({ ghInstalled: false, authenticated: false, activeAccountLogin: undefined, owners: [], suggestedRepoName: "my-repo" }),
+    checkGitHubRepoAvailability: async () => ({ available: false, message: "Unavailable" }),
+    publishToGitHub: async () => ({ ok: false, title: "Publish failed", message: "Unavailable", snapshotChanged: false }),
     listBranches: async () => ({ recent: [], local: [], remote: [], pullRequests: [], pullRequestsStatus: "unavailable" as const }),
     previewMergeBranch: async () => ({ currentBranchName: undefined, targetBranchName: "", targetDisplayName: "", status: "error" as const, commitCount: 0, hasConflicts: false, message: "Merge preview unavailable." }),
     mergeBranch: async () => ({ ok: false as const, title: "Merge failed", message: "Merge unavailable.", snapshotChanged: false }),
@@ -399,6 +403,50 @@ export function createWsRouter({
           const changed = await resolvedDiffStore.refreshSnapshot(project.id, project.localPath)
           send(ws, { v: PROTOCOL_VERSION, type: "ack", id })
           if (changed) {
+            broadcastSnapshots()
+          }
+          return
+        }
+        case "chat.initGit": {
+          const { project } = resolveChatProject(command.chatId)
+          const result = await resolvedDiffStore.initializeGit({
+            projectId: project.id,
+            projectPath: project.localPath,
+          })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          if (result.snapshotChanged) {
+            broadcastSnapshots()
+          }
+          return
+        }
+        case "chat.getGitHubPublishInfo": {
+          const { project } = resolveChatProject(command.chatId)
+          const result = await resolvedDiffStore.getGitHubPublishInfo({
+            projectPath: project.localPath,
+          })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          return
+        }
+        case "chat.checkGitHubRepoAvailability": {
+          const result = await resolvedDiffStore.checkGitHubRepoAvailability({
+            owner: command.owner,
+            name: command.name,
+          })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          return
+        }
+        case "chat.publishToGitHub": {
+          const { project } = resolveChatProject(command.chatId)
+          const result = await resolvedDiffStore.publishToGitHub({
+            projectId: project.id,
+            projectPath: project.localPath,
+            owner: command.owner,
+            name: command.name,
+            visibility: command.visibility,
+            description: command.description,
+          })
+          send(ws, { v: PROTOCOL_VERSION, type: "ack", id, result })
+          if (result.snapshotChanged) {
             broadcastSnapshots()
           }
           return
